@@ -1,0 +1,71 @@
+[project]
+name = "learned-position-increments"
+version = "0.1.0"
+description = "Learned per-token RoPE position increments and their interpretable structure"
+requires-python = ">=3.12"
+dependencies = [
+    # Data
+    "datasets>=3.0",
+    # ML
+    # 2.11+ ships type stubs that trip pyright's reportPrivateImportUsage on
+    # torch.tensor/torch.device/etc.; pin to the 2.10 line (verified clean).
+    "torch>=2.10,<2.11",
+    "transformers>=4.40",
+    "peft>=0.13",
+    "accelerate>=1.0",
+    # Data validation
+    "pydantic>=2.0",
+    # Numerics / analysis
+    "numpy>=1.26",
+    "scipy>=1.13",
+    "scikit-learn>=1.5",
+    "jieba>=0.42",
+    # Visualization
+    "matplotlib>=3.9",
+    # Experiment tracking
+    "wandb>=0.19",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1",
+    "ruff>=0.9",
+    "skypilot[aws,kubernetes,runpod]>=0.12.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "TCH",   # flake8-type-checking
+    "ANN",   # flake8-annotations
+    "RUF",   # ruff-specific rules
+]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["shared", "experiments"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+# pyright >= 1.1.409 false-flags torch's re-exports (torch.tensor, torch.device,
+# torch.bfloat16, ...) as private imports. Suppress that one rule.
+reportPrivateImportUsage = false
+
+[tool.hatch.build.targets.wheel]
+packages = ["shared"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

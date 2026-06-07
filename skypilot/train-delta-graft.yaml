@@ -1,0 +1,31 @@
+# Task fragment for delta-graft training.
+# Resources (GPU, disk, image) are injected by train.sh — do not add here.
+
+workdir: .
+
+setup: |
+  pip install uv awscli -q
+  uv sync --directory ~/sky_workdir
+
+run: |
+  cd ~/sky_workdir
+  export TOKENIZERS_PARALLELISM=false
+  export PYTHONUNBUFFERED=1  # stdout is block-buffered off-tty; flush logs live
+  # Namespace checkpoints per run so queued/concurrent jobs sharing this S3
+  # prefix don't overwrite each other. Defaults to SkyPilot's unique task ID
+  # when RUN_NAME is unset; set RUN_NAME (ideally matching --wandb-run-name).
+  RUN_NAME="${RUN_NAME:-${SKYPILOT_TASK_ID:-run}}"
+  CHECKPOINT_DIR="/tmp/checkpoints/${RUN_NAME}"
+  trap 'echo ">>> Syncing checkpoints to S3..."; aws s3 sync "${CHECKPOINT_DIR}" "s3://brendanlong-experiments/delta_graft/checkpoints/${RUN_NAME}/" || true' EXIT
+  uv run python -m "${TRAIN_MODULE}" \
+    --checkpoint-dir "${CHECKPOINT_DIR}" \
+    ${TRAIN_ARGS}
+
+envs:
+  TRAIN_MODULE: experiments.delta_graft.train
+  TRAIN_ARGS: ""
+  RUN_NAME: ""
+  WANDB_API_KEY: ""
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  AWS_DEFAULT_REGION: us-east-1
