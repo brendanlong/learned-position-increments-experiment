@@ -1,6 +1,6 @@
 # Learned Position Increments
 
-Code for the experiments behind the LessWrong post [**"How Far Apart Does a Model Think Its Tokens Are?"**](https://www.lesswrong.com/posts/Bxju8Fmpo2eW4oj9t/how-far-apart-does-a-model-think-its-tokens-are).
+Code for the experiments behind the blog post [**"How Far Apart Does a Model Think Its Tokens Are?"**](https://www.brendanlong.com/how-far-apart-does-a-model-think-its-tokens-are.html) (also on [LessWrong](https://www.lesswrong.com/posts/Bxju8Fmpo2eW4oj9t/how-far-apart-does-a-model-think-its-tokens-are)).
 
 Standard RoPE gives every token an integer position, so the rotation between two
 tokens depends only on how many tokens apart they are. This repo asks a
