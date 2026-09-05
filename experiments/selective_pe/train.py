@@ -214,6 +214,7 @@ def main() -> None:
     # Training config
     training_config = SelectivePETrainingConfig(
         context_len=args.context_len,
+        dataset_name=f"{args.dataset} ({args.tokenizer})",
         batch_size=args.batch_size,
         lr=args.lr,
         weight_decay=args.weight_decay,
