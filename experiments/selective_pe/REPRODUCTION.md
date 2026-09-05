@@ -12,8 +12,11 @@ and `selective-pe-repro_byte_selective_rope_perlayer_bilingual_256d_8h_6L_lr1e3:
 
 ## Validation loss
 
-| model | original (leaky val) | replica (clean val) | clean run from June 1 |
-|-------|----------------------|---------------------|-----------------------|
+All three columns use the same 2,000-document validation set; "leaky" means
+the original runs' training set also contained those documents.
+
+| model | original (val docs in train set) | replica (clean train set) | RESULTS.md Phase 12 (clean, 2026-06-01) |
+|-------|----------------------------------|---------------------------|------------------------------------------|
 | shared | 1.0468 | 1.0748 | 1.0747 |
 | per-layer | 1.0436 | 1.0712 | 1.0722 |
 
@@ -22,8 +25,8 @@ The original shared checkpoint evaluates to 1.04675 with this repo's code
 
 ## Shared model: per-byte δ (`byte_boundary_analysis.py`, Part 1)
 
-| category | original (= blog table) | replica |
-|----------|-------------------------|---------|
+| category | original checkpoint | replica |
+|----------|---------------------|---------|
 | a-z | 0.68–0.96 (0.79) | 0.71–0.96 (0.82) |
 | Chinese continuation | 0.73–0.86 (0.80) | 0.78–0.92 (0.84) |
 | Chinese lead | 0.84–0.98 (0.92) | 0.83–0.95 (0.90) |
@@ -35,10 +38,12 @@ The original shared checkpoint evaluates to 1.04675 with this repo's code
 | EOS | 2.90 | 2.48 |
 | between-CJK AUC | 0.498 | 0.497 |
 
-The original numbers match the blog table exactly. The shared-model spacing
-figures regenerate pixel-identical to the post's images.
+Every row that appears in the post's table matches it exactly (the post's
+"Punctuation" row is the `. ! ?` category; the `, ; : -` and AUC rows come
+from the script only). The shared-model spacing figures regenerate
+pixel-identical to the post's images.
 
-## Per-layer model, layer 0 (replica only)
+## Per-layer model, layer-0 δ (original numbers from the post)
 
 | category | blog (original) | replica |
 |----------|-----------------|---------|
@@ -49,11 +54,13 @@ figures regenerate pixel-identical to the post's images.
 | `. ! ?` | 9.80–9.98 (9.90) | 4.33–5.94 (4.96) |
 | EOS | 9.82 | 8.67 |
 | space | 9.99 | 9.87 |
-| newline | 9.99 | 9.99 |
+| newline | 9.99 | 9.89 |
 
-Same ordering (lowercase < continuation < lead < uppercase < punctuation <
-EOS/space/newline); the replica pushes fewer categories to the `max_delta=10`
-ceiling.
+Same broad hierarchy (lowercase < continuation < lead-byte/uppercase <
+punctuation < EOS/space/newline), but the replica pushes fewer categories to
+the `max_delta=10` ceiling, and one detail does not replicate: the post has
+uppercase (9.52) far above Chinese lead bytes (2.43), whereas the replica has
+uppercase (2.17) slightly *below* lead bytes (2.40).
 
 ## Chinese word-boundary AUC vs jieba (per-layer)
 
@@ -67,9 +74,8 @@ ceiling.
 | L5 | 0.47 | 0.501 | 0.411 |
 
 Same pattern: L0 at chance, L2/L4 detect boundaries, L3 anti-correlated.
-The blog and Phase 10 columns disagree slightly (L2, L5) and both came from
-the now-lost checkpoint, so which analysis settings produced which cannot be
-checked. For the original models the "held-out" Chinese text was inside the
+The blog and Phase 10 columns disagree slightly (L2, L5); both came from the
+now-lost checkpoint, so the analysis settings behind each cannot be rerun. For the original models the "held-out" Chinese text was inside the
 training set; for the replica it is genuinely held out.
 
 ## Entity reversed-order control (`entity_grouping_analysis.py`)
