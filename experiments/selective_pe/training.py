@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import math
+import os
+import secrets
+import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +17,7 @@ import wandb
 from torch import Tensor
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR
 
+from experiments.selective_pe.data import StreamingChunkDataset
 from experiments.selective_pe.model import SelectivePETransformer, print_model_summary
 from shared.checkpoint import upload_checkpoint_to_wandb
 
@@ -55,6 +59,33 @@ def save_model_checkpoint(
     )
     print(f"  Saved checkpoint: {ckpt_path}")
     return ckpt_path
+
+
+def optimizer_param_groups(
+    model: torch.nn.Module, weight_decay: float
+) -> list[dict[str, object]]:
+    """Decay weight matrices only: not norms, biases or the (tied) embedding.
+
+    Decaying the DeltaMLP output bias would also pull every delta toward
+    softplus(0) ~ 0.69 regardless of the data.
+    """
+    decay, no_decay = [], []
+    for name, p in model.named_parameters():
+        if p.dim() >= 2 and "tok_emb" not in name:
+            decay.append(p)
+        else:
+            no_decay.append(p)
+    return [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+
+
+def _save_resume_state(path: Path, state: dict[str, object]) -> None:
+    """Write atomically so a preemption mid-save can't corrupt the last state."""
+    tmp = path.with_suffix(".tmp")
+    torch.save(state, tmp)
+    os.replace(tmp, path)
 
 
 @torch.no_grad()
@@ -204,6 +235,7 @@ def train_selective_pe(
     """
     print_model_summary(model)
     model = model.to(device)
+    uncompiled = model
 
     # torch.compile
     if use_compile and device.type == "cuda":
@@ -212,9 +244,7 @@ def train_selective_pe(
 
     # Optimizer
     optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=lr,
-        weight_decay=weight_decay,
+        optimizer_param_groups(model, weight_decay), lr=lr, betas=(0.9, 0.95)
     )
 
     # LR schedule: linear warmup -> cosine or constant
@@ -233,27 +263,65 @@ def train_selective_pe(
     else:
         scheduler = warmup_sched
 
-    # Wandb
-    if use_wandb:
-        wandb.init(
-            project=wandb_project,
-            name=wandb_run_name,
-            config=wandb_config or {},
-            reinit=True,
-        )
-
     # Training state
     global_step = 0
     running_loss = torch.tensor(0.0, device=device)
     running_count = 0
     best_val_loss = float("inf")
     last_checkpoint_path: Path | None = None
-    t0 = time.time()
 
     # Keep a sample batch for delta logging
     sample_input_ids: Tensor | None = None
 
+    # Resume after preemption: training state is saved every save_every_steps
+    # and on SIGTERM, and picked up here when the job restarts.
     ckpt_dir = Path(checkpoint_dir)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    resume_path = ckpt_dir / "resume.pt"
+    wandb_id = secrets.token_hex(4)
+    if resume_path.exists():
+        state = torch.load(resume_path, map_location=device, weights_only=False)
+        uncompiled.load_state_dict(state["model"])
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        global_step = state["global_step"]
+        best_val_loss = state["best_val_loss"]
+        sample_input_ids = state["sample_input_ids"]
+        wandb_id = state["wandb_id"]
+        # Don't replay the windows already trained on
+        if isinstance(train_loader.dataset, StreamingChunkDataset):
+            train_loader.dataset.seed += global_step
+        print(f"Resumed from {resume_path} at step {global_step:,}")
+
+    def resume_state() -> dict[str, object]:
+        return {
+            "model": uncompiled.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "global_step": global_step,
+            "best_val_loss": best_val_loss,
+            "sample_input_ids": sample_input_ids,
+            "wandb_id": wandb_id,
+        }
+
+    stop_requested = False
+
+    def request_stop(signum: int, _frame: object) -> None:
+        nonlocal stop_requested
+        print(f"Received signal {signum}; saving state after this step")
+        stop_requested = True
+
+    signal.signal(signal.SIGTERM, request_stop)
+
+    if use_wandb:
+        wandb.init(
+            project=wandb_project,
+            name=wandb_run_name,
+            config=wandb_config or {},
+            id=wandb_id,
+            resume="allow",
+        )
+    t0 = time.time()
 
     effective_batch = (train_loader.batch_size or 1) * grad_accum_steps
 
@@ -383,6 +451,14 @@ def train_selective_pe(
                 model_config,
                 ckpt_dir,
             )
+            _save_resume_state(resume_path, resume_state())
+
+        if stop_requested:
+            _save_resume_state(resume_path, resume_state())
+            print(f"Saved resume state at step {global_step:,}; exiting")
+            if use_wandb:
+                wandb.finish(exit_code=143)
+            raise SystemExit(143)
 
         if global_step >= total_steps:
             done = True
@@ -425,6 +501,7 @@ def train_selective_pe(
             )
         wandb.finish()
 
+    resume_path.unlink(missing_ok=True)
     return TrainingResult(
         best_val_loss=best_val_loss,
         final_val_loss=final_eval["val/loss"],

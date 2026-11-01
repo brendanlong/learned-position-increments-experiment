@@ -268,9 +268,11 @@ def load_checkpoint(source: str) -> "SelectivePETransformer":
         _resolve_checkpoint_path(source), map_location="cpu", weights_only=True
     )
     model_config = ckpt["model_config"]
-    # Checkpoints from before these were configurable (the blog post's models)
-    # were trained without document masking, and per-layer ones with a sigmoid
+    # Fields missing from older checkpoints get the behavior they were trained
+    # with. Checkpoints without max_delta (the blog post's models) were also
+    # trained without document masking, and per-layer ones with a sigmoid
     # bound of 10.
+    model_config.setdefault("qk_norm", False)
     if "max_delta" not in model_config:
         model_config["doc_mask"] = False
         if model_config.get("per_layer_delta"):
@@ -395,6 +397,11 @@ class Attention(nn.Module):
             bias=False,
         )
         self.resid_dropout = nn.Dropout(config.dropout)
+        self.q_norm: nn.Module = nn.Identity()
+        self.k_norm: nn.Module = nn.Identity()
+        if config.qk_norm:
+            self.q_norm = nn.RMSNorm(config.head_dim, eps=config.norm_eps)
+            self.k_norm = nn.RMSNorm(config.head_dim, eps=config.norm_eps)
 
     def forward(
         self,
@@ -415,8 +422,8 @@ class Attention(nn.Module):
         """
         batch, seq_len, _ = x.shape
 
-        q = self.wq(x).view(batch, seq_len, self.n_heads, self.head_dim)
-        k = self.wk(x).view(batch, seq_len, self.n_heads, self.head_dim)
+        q = self.q_norm(self.wq(x).view(batch, seq_len, self.n_heads, self.head_dim))
+        k = self.k_norm(self.wk(x).view(batch, seq_len, self.n_heads, self.head_dim))
         v = self.wv(x).view(batch, seq_len, self.n_heads, self.head_dim)
 
         if self.pos_encoding == "rope":

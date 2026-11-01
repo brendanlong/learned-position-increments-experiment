@@ -69,6 +69,9 @@ def main() -> None:
     parser.add_argument("--rope-theta", type=float, default=10000.0)
     parser.add_argument("--delta-hidden-dim", type=int, default=None)
     parser.add_argument(
+        "--intermediate-dim", type=int, default=None, help="FFN width (4 * dim)"
+    )
+    parser.add_argument(
         "--per-layer-delta",
         action="store_true",
         help="Use per-layer DeltaMLPs instead of shared (for selective variants)",
@@ -215,6 +218,7 @@ def main() -> None:
         doc_mask=not args.no_doc_mask,
         per_head_delta=args.per_head_delta,
         decay=args.decay,
+        intermediate_dim=args.intermediate_dim,
     )
 
     # Training config

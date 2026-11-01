@@ -52,6 +52,8 @@ class SelectivePEModelConfig(BaseModel):
     # Block attention across EOS (document boundaries). False only for the
     # no-masking control and checkpoints trained before masking existed.
     doc_mask: bool = True
+    # RMSNorm on each head's queries and keys before RoPE (as in OLMo 2)
+    qk_norm: bool = True
 
     @model_validator(mode="after")
     def _validate_architecture(self) -> "SelectivePEModelConfig":
@@ -99,13 +101,14 @@ def selective_pe_model_config(
     per_head_delta: bool = False,
     decay: Literal["none", "alibi", "learned"] = "none",
     doc_mask: bool = True,
+    intermediate_dim: int | None = None,
 ) -> SelectivePEModelConfig:
     """Create model config with sensible defaults for selective PE experiments."""
     return SelectivePEModelConfig(
         dim=dim,
         n_heads=n_heads,
         n_layers=n_layers,
-        intermediate_dim=dim * 4,
+        intermediate_dim=intermediate_dim or dim * 4,
         vocab_size=vocab_size,
         max_seq_len=max_seq_len,
         pos_encoding=pos_encoding,

@@ -6,6 +6,7 @@ from torch import Tensor
 
 from experiments.selective_pe.config import BYTE_EOS_ID, selective_pe_model_config
 from experiments.selective_pe.model import SelectivePETransformer
+from experiments.selective_pe.training import optimizer_param_groups
 
 
 def _model(kwargs: dict[str, Any]) -> SelectivePETransformer:
@@ -87,3 +88,16 @@ def test_without_doc_mask_documents_see_each_other() -> None:
             for _ in range(2)
         )
     assert not torch.allclose(a[0, 12:], b[0, 12:])
+
+
+def test_weight_decay_only_on_weight_matrices() -> None:
+    model = _model(dict(pos_encoding="selective_rope", per_layer_delta=True))
+    decay, no_decay = optimizer_param_groups(model, 0.1)
+    decayed = {id(p) for p in decay["params"]}  # type: ignore[union-attr]
+    names = {n for n, p in model.named_parameters() if id(p) in decayed}
+    assert "layers.0.attn.wq.weight" in names
+    assert "delta_mlps.0.fc2.weight" in names
+    assert not any("norm" in n or n.endswith("bias") for n in names)
+    assert "tok_emb.weight" not in names
+    n_params = len(list(model.parameters()))
+    assert len(decay["params"]) + len(no_decay["params"]) == n_params  # type: ignore[arg-type]
