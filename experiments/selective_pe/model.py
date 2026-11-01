@@ -264,7 +264,9 @@ def _resolve_checkpoint_path(source: str) -> str:
 
 def load_checkpoint(source: str) -> "SelectivePETransformer":
     """Load a model in eval mode from a local path or "wandb:..." artifact."""
-    ckpt = torch.load(_resolve_checkpoint_path(source), weights_only=True)
+    ckpt = torch.load(
+        _resolve_checkpoint_path(source), map_location="cpu", weights_only=True
+    )
     model_config = ckpt["model_config"]
     # Checkpoints from before these were configurable (the blog post's models)
     # were trained without document masking, and per-layer ones with a sigmoid

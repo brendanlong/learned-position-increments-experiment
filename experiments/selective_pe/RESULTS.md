@@ -427,8 +427,9 @@ The control's checkpoint config was written before `doc_mask` existed; it was
 patched to `doc_mask: false` on the cluster before analysis, but its wandb
 artifact still lacks the field.
 
-Raw outputs (all tables below, plus the character-spacing plots) are in
-`results/docmask/`.
+Every table below comes from `delta_ablation.py`, `byte_boundary_analysis.py`
+and `entity_grouping_analysis.py` run on the final checkpoints (saved as wandb
+artifacts `selective-pe-<run name>`).
 
 ### Explosion
 
