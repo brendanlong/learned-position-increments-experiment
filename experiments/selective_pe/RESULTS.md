@@ -396,6 +396,161 @@ achieves via q/k content. The loss landscape pushes the model to *use* δ
 (it's not cosmetic), but at the same capability — a different solution, not a
 better one.
 
+## Phase 13: Document masking, unbounded per-layer deltas, and ablations
+
+**Question.** Per-layer deltas were capped (sigmoid, max_delta = 10) because
+they exploded. Training samples random 512-byte windows over EOS-joined
+documents, and attention used to cross EOS. The hypothesis: a huge position
+jump scrambles RoPE phase across a boundary, which was the model's only way to
+stop attending to the previous, unrelated document. So: block attention across
+EOS, remove the cap, and check (a) whether the explosion goes away and (b)
+whether the model actually uses its deltas.
+
+**Setup.** The blog-post config (byte-level bilingual Wikipedia, 256d/8h/6L,
+50k steps, batch 64 × 512, lr 1e-3). Per-layer DeltaMLPs keep the RMSNorm
+input but use the same unbounded softplus as the shared one. Runs (wandb
+`byte-pe`, lab Slurm A40s):
+
+| run | wandb | doc mask | final val loss |
+|---|---|---|---|
+| `docmask_rope_s42` (baseline) | `ycqqcknn` | yes | 1.0752 |
+| `docmask_shared_s42` | `4zee13hf` | yes | 1.0716 |
+| `docmask_perlayer_s42` | `zp4muno6` | yes | 1.0711 |
+| `docmask_perlayer_s1` | `qi0epy7e` | yes | 1.0698 |
+| `docmask_perlayer_s2` | `3866xiyd` | yes | 1.0697 |
+| `nodoc_mask_perlayer_unbounded_s42` (control) | `rrzpmhro` | no | 1.0787 |
+
+The control was evaluated without masking, so its val loss isn't directly
+comparable. The masked runs are again loss-neutral to slightly better than the
+RoPE baseline (−0.004 to −0.006, across 3 per-layer seeds vs 1 baseline seed).
+The control's checkpoint config was written before `doc_mask` existed; it was
+patched to `doc_mask: false` on the cluster before analysis, but its wandb
+artifact still lacks the field.
+
+Raw outputs (all tables below, plus the character-spacing plots) are in
+`results/docmask/`.
+
+### Explosion
+
+Largest delta on the logged sample batch (one batch per log step, so noisy):
+
+| step | control (no mask) | masked s42 | masked s1 | masked s2 |
+|---|---|---|---|---|
+| 1k | 2.9 | 1.9 | 3.9 | 2.0 |
+| 3k | 48.7 (L1 **mean** 45) | 3.1 | 8.8 | 3.0 |
+| 5k | **107.4** (L1 mean 23) | 3.5 | 11.0 | 3.3 |
+| 10k | 14.8 | 7.8 | 10.4 | 7.1 |
+| 50k | 25.0 | 8.4 | 15.3 | 7.2 |
+| peak | 107.4 | 13.7 | 17.0 | 12.9 |
+
+- With RMSNorm on the DeltaMLP input, even the unmasked control doesn't diverge
+  to the 500K+ of the original v1; it spikes early, then settles.
+- Masking removes the early spike entirely and keeps every layer's typical
+  delta near 1. Two masked seeds still exceed 10, so the old cap would have
+  bound some tokens even with masking.
+- At the end of training, the control's L3 sets EOS to **700×** that layer's
+  typical delta (≈ 25, the largest delta in the model), and the blog-post
+  replica (bounded, unmasked) sets EOS to 200× in L5. That is the
+  document-cutting use the hypothesis predicted. In the masked runs EOS starts
+  a document, so its delta has no effect (it shifts every later position
+  equally) and the EOS rows below are meaningless.
+
+### Speed and pattern
+
+Scaling every delta in a layer is the same as changing that layer's RoPE base,
+so each layer's deltas split into a **speed** (geometric mean delta over val
+data) and a **pattern** (delta / speed). This is done in analysis, not in the
+model (`delta_ablation.py`), as agreed with Brendan.
+
+Layer speeds:
+
+| run | L0 | L1 | L2 | L3 | L4 | L5 |
+|---|---|---|---|---|---|---|
+| masked s42 | 1.44 | 1.49 | 0.97 | 0.59 | 0.65 | **0.089** |
+| masked s1 | 1.70 | 1.63 | 0.98 | 1.07 | **0.093** | 0.26 |
+| masked s2 | 1.46 | 0.85 | 0.43 | 1.07 | 0.94 | **0.053** |
+| control | 2.17 | 2.30 | 1.17 | **0.035** | 0.84 | 0.70 |
+| blog replica | 1.95 | 1.58 | 1.29 | 0.43 | 1.12 | **0.049** |
+
+Every per-layer model has exactly one deep layer whose speed collapses to
+≈ 0.04–0.09: positions there barely change within a 512-byte window, so that
+layer runs almost without position information *except* at large-pattern
+tokens. In that layer, newline is 11–23× the typical delta (masked seeds), and
+the character plots show it packing whole words together with gaps between
+them. Which layer does this varies by seed.
+
+### Do the deltas matter? (layer-by-layer ablation)
+
+Loss increase (nats/byte, 819k val tokens spread over the val set) when a
+layer's deltas are replaced by 1 (integer RoPE) or by the layer's speed (keeps
+speed, removes pattern):
+
+| run | all = 1 | all = speed | L0 = speed | largest other layer = speed | largest other layer = 1 |
+|---|---|---|---|---|---|
+| masked per-layer s42 | +0.71 | +0.13 | +0.097 | L1 +0.008 | L5 +0.118 |
+| masked per-layer s1 | +1.36 | +0.30 | +0.261 | L4 +0.011 | L1 +0.280 |
+| masked per-layer s2 | +0.65 | +0.20 | +0.090 | L2 +0.054 | L5 +0.098 |
+| masked shared | +0.27 | +0.061 | +0.046 | L1 +0.003 | L1 +0.014 |
+| control (no mask) | +2.11 | +0.32 | +0.256 | L1 +0.017 | L1 +0.949 |
+| blog replica, per-layer | +1.11 | +0.30 | +0.265 | L5 +0.005 | L1 +0.193 |
+| blog replica, shared | +0.16 | +0.024 | +0.009 | L1 +0.007 | L1 +0.029 |
+
+For the shared models the same deltas feed every layer; a per-layer row
+replaces them only in that layer's attention.
+
+- **"Loss-neutral" doesn't mean unused.** Each model matches plain RoPE's loss,
+  but takes it from the deltas: forcing integer positions everywhere costs
+  0.65–1.36 nats in the masked per-layer models.
+- **The pattern that matters is L0's**, i.e. the byte-identity pattern
+  (+0.09 to +0.26 nats when removed), consistently across seeds.
+- **The deeper layers' contextual patterns barely matter**: removing one costs
+  ≤ 0.011 nats, apart from s2 L2 (+0.054). These are the layers behind the
+  blog post's Chinese-word-boundary and multi-word-entity findings, so that
+  structure is real but cheap for the model to lose.
+- **Deep-layer speed matters**: setting the near-position-free layer back to
+  speed 1 costs 0.10–0.21 nats in every per-layer model.
+
+### Interpretability results across seeds (masked)
+
+Chinese word-boundary ROC-AUC vs jieba (0.5 = chance; values below 0.5 mean
+boundaries get *smaller* deltas):
+
+| layer | s42 | s1 | s2 | control | blog (retrained, unmasked) |
+|---|---|---|---|---|---|
+| L0 | 0.52 | 0.52 | 0.51 | 0.49 | ~0.5 |
+| L1 | 0.54 | 0.53 | 0.64 | 0.47 | ~0.5 |
+| L2 | 0.57 | 0.54 | 0.57 | 0.55 | 0.63 |
+| L3 | 0.53 | 0.61 | 0.64 | 0.63 | 0.41 |
+| L4 | 0.47 | **0.24** | 0.63 | 0.52 | 0.72 |
+| L5 | 0.46 | 0.39 | 0.56 | 0.46 | 0.41 |
+
+Some contextual layer separates word boundaries in every seed, but which layer,
+how strongly, and in which direction varies. With masking, s42 is the weakest
+(max |AUC − 0.5| = 0.07).
+
+Multi-word entity test (delta at the internal space, real order vs reversed;
+two-sided Wilcoxon p):
+
+| layer | s42 | s1 | s2 | control |
+|---|---|---|---|---|
+| L1 | 2e-4 | 1e-3 | 0.9 | 0.28 |
+| L2 | 8e-4 | 2e-8 | 1e-4 | 0.11 |
+| L3 | 8e-7 | 9e-5 | 4e-9 | 2e-6 |
+| L4 | 0.08 | 3e-12 | 6e-10 | 2e-8 |
+| L5 | 1e-7 | 2e-8 | 6e-9 | 1e-6 |
+
+This is the most robust contextual result: real-order entities get a smaller
+internal-space delta in L2/L3/L5 in all three masked seeds. (As before, this
+measures the model's forward expectation that the word continues; the
+next-byte-uncertainty baseline below would show how much more it is.)
+
+### Not done yet
+
+- A next-byte-uncertainty baseline for the jieba AUC and the entity test (is
+  the delta more informative than the model's own predictive entropy at that
+  position?).
+- More than one seed for the control and the RoPE baseline.
+
 ## Overall Conclusions
 
 1. **Loss-neutral everywhere (positions).** Across all delta phases, the
@@ -431,6 +586,5 @@ better one.
 
 - Length-extrapolation eval (train 512, test longer): the regime where ALiBi /
   a content-dependent forget gate would actually be expected to win.
-- Re-run per-layer with higher `max_delta` to resolve L1 saturation.
 - Reconcile the indirect-indexing discrepancy (single- vs multi-hop task).
 - Music (MAESTRO) — where PoPE showed its largest gains; needs a tokenizer.
