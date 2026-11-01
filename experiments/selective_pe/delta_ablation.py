@@ -1,14 +1,18 @@
 """Does the model use its learned increments? Ablate them one layer at a time.
 
-For each layer, replace that layer's learned deltas with either
+Each layer's deltas split into a speed and a pattern: the layer's speed is
+the geometric mean of its deltas over the eval data (scaling every delta in a
+layer is the same as changing that layer's RoPE base), and the pattern is
+delta / speed. The script prints both, with the pattern averaged by input
+byte category.
+
+Then, for each layer, it replaces that layer's learned deltas with either
   - 1 (plain integer RoPE positions for that layer), or
-  - the layer's mean delta (keeps the layer's overall speed, removes the
-    per-token pattern),
-and measure validation loss. A large loss increase from the mean ablation
-means the model relies on the per-token pattern itself, not just on running
-the layer's position clock faster or slower. Loss is also broken down by the
-category of the input byte (e.g. "after space" = predicting a word's first
-byte).
+  - the layer's speed (keeps the speed, removes the per-token pattern),
+and measures validation loss. A large loss increase from the speed ablation
+means the model relies on the per-token pattern itself. Loss is also broken
+down by the category of the input byte (e.g. "after space" = predicting a
+word's first byte).
 """
 
 from __future__ import annotations
@@ -29,8 +33,8 @@ Override = Callable[[Tensor, int], Tensor] | None
 
 
 @torch.no_grad()
-def layer_mean_deltas(model: SelectivePETransformer, batches: list[Tensor]) -> Tensor:
-    """(n_layers, n_heads_or_1) mean delta over all eval tokens."""
+def collect_deltas(model: SelectivePETransformer, batches: list[Tensor]) -> Tensor:
+    """(n_layers, n_batches, B, S, n_heads_or_1) learned deltas."""
     per_batch = []
     for ids in batches:
         # Same autocast as per_token_loss, so later layers see the same inputs
@@ -38,8 +42,8 @@ def layer_mean_deltas(model: SelectivePETransformer, batches: list[Tensor]) -> T
             deltas = torch.stack(model.run(ids)[2])  # (L, B, S[, H])
         if deltas.dim() == 3:
             deltas = deltas.unsqueeze(-1)
-        per_batch.append(deltas.mean(dim=(1, 2)))
-    return torch.stack(per_batch).mean(dim=0)
+        per_batch.append(deltas)
+    return torch.stack(per_batch, dim=1)
 
 
 def constant_override(layers: set[int], values: Tensor) -> Override:
@@ -104,31 +108,43 @@ def main() -> None:
     batches = list(seqs.to(device).split(args.batch_size))
     inputs = torch.stack([ids[:, :-1] for ids in batches])  # (N, B, S)
 
-    means = layer_mean_deltas(model, [ids[:, :-1] for ids in batches])
-    ones = torch.ones_like(means)
+    categories = {
+        name: torch.isin(inputs, torch.tensor(ids, device=device))
+        for name, ids in BYTE_CATEGORIES.items()
+    }
+    categories = {name: m for name, m in categories.items() if m.any()}
+
+    deltas = collect_deltas(model, [ids[:, :-1] for ids in batches])
+    log_deltas = deltas.log()
+    speeds = log_deltas.mean(dim=(1, 2, 3)).exp()  # (L, H)
+    ones = torch.ones_like(speeds)
+    pattern = (log_deltas - speeds.log()[:, None, None, None]).exp().mean(-1)
     print(f"checkpoint: {args.checkpoint}")
+    print("\nPer-layer speed (geometric mean delta) and pattern (delta / speed)")
+    print(f"{'':<48}" + "".join(f"{f'L{i}':>8}" for i in range(n_layers)))
+    print(f"{'speed':<48}" + "".join(f"{v:>8.3f}" for v in speeds.mean(-1)))
     print(
-        "layer mean deltas: "
-        + "  ".join(f"L{i}={means[i].mean():.3f}" for i in range(n_layers))
+        f"{'max delta':<48}"
+        + "".join(f"{deltas[i].max().item():>8.2f}" for i in range(n_layers))
     )
+    for name, m in categories.items():
+        print(
+            f"{'pattern: ' + name:<48}"
+            + "".join(f"{pattern[i][m].mean().item():>8.2f}" for i in range(n_layers))
+        )
 
     conditions: list[tuple[str, Override]] = [("learned", None)]
     all_layers = set(range(n_layers))
     conditions.append(("all layers = 1", constant_override(all_layers, ones)))
-    conditions.append(("all layers = mean", constant_override(all_layers, means)))
+    conditions.append(("all layers = speed", constant_override(all_layers, speeds)))
     for layer in range(n_layers):
         conditions.append((f"L{layer} = 1", constant_override({layer}, ones)))
-        conditions.append((f"L{layer} = mean", constant_override({layer}, means)))
-
-    categories = {
-        f"after {name}": torch.isin(inputs, torch.tensor(ids, device=device))
-        for name, ids in BYTE_CATEGORIES.items()
-    }
+        conditions.append((f"L{layer} = speed", constant_override({layer}, speeds)))
 
     rows: list[tuple[str, float, dict[str, float]]] = []
     for name, override in conditions:
         loss = per_token_loss(model, batches, override)
-        by_cat = {c: loss[m].mean().item() for c, m in categories.items() if m.any()}
+        by_cat = {f"after {c}": loss[m].mean().item() for c, m in categories.items()}
         rows.append((name, loss.mean().item(), by_cat))
 
     base_loss, base_cats = rows[0][1], rows[0][2]
@@ -140,7 +156,7 @@ def main() -> None:
     )
     print(
         f"{'(tokens)':<20} {n_tokens:>16,}  "
-        + "  ".join(f"{int(categories[c].sum()):>24,}" for c in cat_names)
+        + "  ".join(f"{int(m.sum()):>24,}" for m in categories.values())
     )
     for name, loss, by_cat in rows:
         cells = "  ".join(
