@@ -90,7 +90,7 @@ class DeltaGraftModel(nn.Module):
 
         hidden = int(self._base.config.hidden_size)
         hidden_dim = config.delta_hidden_dim or hidden // 4
-        self.delta_mlp = DeltaMLP(hidden, hidden_dim, bounded=False, n_heads=1)
+        self.delta_mlp = DeltaMLP(hidden, hidden_dim)
         # Zero the output weight so delta == softplus(bias) == 1.0 exactly at
         # init (the bias is set to 0.5413 by DeltaMLP). Mirrors LoRA's zero-init
         # B matrix: the graft is a true identity until training moves it.
@@ -113,7 +113,7 @@ class DeltaGraftModel(nn.Module):
         at 1024 is ~8), which would corrupt long-context RoPE phases.
         """
         with torch.autocast(device_type=embed.device.type, enabled=False):
-            return self.delta_mlp.get_deltas(embed.float())  # (B, S), > 0
+            return self.delta_mlp(embed.float())  # (B, S), > 0
 
     def _positions(self, embed: Tensor) -> Tensor:
         """Exclusive cumsum of per-token deltas: token 0 -> position 0."""

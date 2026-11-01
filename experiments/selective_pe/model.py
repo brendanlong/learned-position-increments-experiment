@@ -8,9 +8,10 @@ Supports four PE modes:
 
 The selective variants use a small MLP (DeltaMLP) to produce per-token
 position strides delta_t > 0 from token embeddings. Cumulative sum gives
-real-valued positions. This is computed once and shared across all layers.
+real-valued positions, either shared across layers or per-layer.
 """
 
+import math
 from collections.abc import Callable
 
 import torch
@@ -141,22 +142,20 @@ def apply_pope_batched(x: Tensor, freqs: Tensor) -> Tensor:
 class DeltaMLP(nn.Module):
     """Small MLP producing per-token position deltas.
 
-    Takes hidden states and outputs a scalar delta_t > 0 for each token.
-    Cumulative sum gives positions.
+    Takes hidden states and outputs a scalar delta_t > 0 for each token:
+    [RMSNorm ->] Linear -> GELU -> Linear -> softplus, with the output bias
+    initialized so delta ~ 1.0. ``normalize_input`` is for per-layer deltas,
+    which read hidden states whose norm grows with depth.
 
-    Two modes controlled by ``bounded``:
-    - Unbounded (default, for shared delta on embeddings):
-      Linear -> GELU -> Linear -> softplus.
-      Output bias initialized so softplus(bias) ~ 1.0.
-    - Bounded (for per-layer delta on hidden states):
-      RMSNorm -> Linear -> GELU -> Linear -> sigmoid * max_delta.
-      Input normalization prevents hidden-state magnitude from driving
-      explosion; sigmoid bounding prevents output divergence.
-      Bias initialized so sigmoid(bias) * max_delta ~ 1.0.
+    ``max_delta`` replaces softplus with ``sigmoid * max_delta``. It exists
+    only to load the bounded per-layer checkpoints behind the blog post.
 
     Set ``n_heads > 1`` for per-head rates: the output is (B, S, n_heads)
     instead of (B, S), letting each head learn its own "rate of time"
     (per-head RoPE frequency scaling).
+
+    Deltas are computed in fp32 with autocast disabled: positions are their
+    cumsum, and bf16 can't distinguish nearby positions past a few hundred.
     """
 
     def __init__(
@@ -164,58 +163,50 @@ class DeltaMLP(nn.Module):
         dim: int,
         hidden_dim: int,
         *,
-        bounded: bool = False,
-        max_delta: float = 10.0,
+        normalize_input: bool = False,
+        max_delta: float | None = None,
         n_heads: int = 1,
     ) -> None:
         super().__init__()
-        self.bounded = bounded
         self.max_delta = max_delta
         self.n_heads = n_heads
-        self.norm: nn.Module | None = nn.RMSNorm(dim) if bounded else None
+        self.norm: nn.Module | None = nn.RMSNorm(dim) if normalize_input else None
         self.fc1 = nn.Linear(dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, n_heads)
         self._init_bias()
 
     def _init_bias(self) -> None:
         """Set output bias so initial delta ~ 1.0."""
-        if self.bounded:
+        if self.max_delta is not None:
             # sigmoid(x) * max_delta = 1.0  =>  x = log(1/(max_delta-1))
-            import math
-
             bias_val = math.log(1.0 / (self.max_delta - 1.0))
-            nn.init.constant_(self.fc2.bias, bias_val)
         else:
-            # softplus(0.5413) ~ 1.0
-            nn.init.constant_(self.fc2.bias, 0.5413)
-
-    def _compute_delta(self, x: Tensor) -> Tensor:
-        """Compute raw delta values (before cumsum). (B,S) or (B,S,H)."""
-        if self.norm is not None:
-            x = self.norm(x)
-        h = F.gelu(self.fc1(x))
-        raw = self.fc2(h)  # (B, S, n_heads)
-        if self.n_heads == 1:
-            raw = raw.squeeze(-1)  # (B, S)
-        if self.bounded:
-            return self.max_delta * torch.sigmoid(raw)
-        return F.softplus(raw)
+            bias_val = math.log(math.expm1(1.0))  # softplus^-1(1.0) ~ 0.5413
+        nn.init.constant_(self.fc2.bias, bias_val)
 
     def forward(self, x: Tensor) -> Tensor:
-        """Compute cumulative positions from hidden states.
+        """Per-token deltas, (B,S) or (B,S,H) for per-head."""
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            x = x.float()
+            if self.norm is not None:
+                x = self.norm(x)
+            raw = self.fc2(F.gelu(self.fc1(x)))  # (B, S, n_heads)
+            if self.n_heads == 1:
+                raw = raw.squeeze(-1)  # (B, S)
+            if self.max_delta is not None:
+                return self.max_delta * torch.sigmoid(raw)
+            return F.softplus(raw)
 
-        Returns (B, S) for a shared rate or (B, S, n_heads) for per-head.
-        Cumsum runs over the seq dim; for per-head we transpose so the scan
-        is over the last (contiguous) dim (avoids a torch.compile cumsum bug).
-        """
-        delta = self._compute_delta(x)
-        if delta.dim() == 3:  # (B, S, H) -> cumsum over S via last-dim scan
-            return torch.cumsum(delta.transpose(1, 2), dim=-1).transpose(1, 2)
-        return torch.cumsum(delta, dim=1)
 
-    def get_deltas(self, x: Tensor) -> Tensor:
-        """Return raw deltas (before cumsum) for interpretability."""
-        return self._compute_delta(x)
+def positions_from_deltas(delta: Tensor) -> Tensor:
+    """Cumulative positions over the seq dim, (B,S) or (B,S,H).
+
+    For per-head we transpose so the scan is over the last (contiguous) dim
+    (avoids a torch.compile cumsum bug).
+    """
+    if delta.dim() == 3:
+        return torch.cumsum(delta.transpose(1, 2), dim=-1).transpose(1, 2)
+    return torch.cumsum(delta, dim=1)
 
 
 class FrozenDeltaLookup(nn.Module):
@@ -233,20 +224,7 @@ class FrozenDeltaLookup(nn.Module):
         self.register_buffer("deltas", deltas_per_token)
 
     def forward(self, input_ids: Tensor) -> Tensor:
-        """Look up deltas by token ID and cumsum.
-
-        Args:
-            input_ids: (batch, seq_len) token IDs
-
-        Returns:
-            positions: (batch, seq_len) cumulative positions
-        """
-        assert isinstance(self.deltas, Tensor)
-        delta = self.deltas[input_ids]  # (B, S)
-        return torch.cumsum(delta, dim=1)
-
-    def get_deltas(self, input_ids: Tensor) -> Tensor:
-        """Return raw deltas (before cumsum)."""
+        """(batch, seq_len) token IDs -> (batch, seq_len) deltas."""
         assert isinstance(self.deltas, Tensor)
         return self.deltas[input_ids]
 
@@ -284,6 +262,20 @@ def _resolve_checkpoint_path(source: str) -> str:
     return os.path.join(download_dir, pt_files[0])
 
 
+def load_checkpoint(source: str) -> "SelectivePETransformer":
+    """Load a model in eval mode from a local path or "wandb:..." artifact."""
+    ckpt = torch.load(_resolve_checkpoint_path(source), weights_only=True)
+    model_config = ckpt["model_config"]
+    # Per-layer checkpoints from before max_delta was configurable were
+    # trained with a sigmoid bound of 10 (the blog post's models).
+    if "max_delta" not in model_config and model_config.get("per_layer_delta"):
+        model_config["max_delta"] = 10.0
+    model = SelectivePETransformer(SelectivePEModelConfig(**model_config))
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+    return model
+
+
 def extract_frozen_deltas(source: str) -> Tensor:
     """Extract per-token deltas from a trained selective PE checkpoint.
 
@@ -293,21 +285,15 @@ def extract_frozen_deltas(source: str) -> Tensor:
     Loads the checkpoint, runs the DeltaMLP on all token embeddings,
     and returns a (vocab_size,) tensor of frozen deltas.
     """
-    checkpoint_path = _resolve_checkpoint_path(source)
-    ckpt = torch.load(checkpoint_path, weights_only=True)
-    src_config = SelectivePEModelConfig(**ckpt["model_config"])
-    src_model = SelectivePETransformer(src_config)
-    src_model.load_state_dict(ckpt["model_state_dict"])
-    src_model.eval()
-
+    src_model = load_checkpoint(source)
     assert src_model.delta_mlp is not None, (
-        f"Checkpoint {checkpoint_path} is not a selective PE model"
+        f"Checkpoint {source} is not a shared-delta selective PE model"
     )
 
     with torch.no_grad():
-        all_ids = torch.arange(src_config.vocab_size).unsqueeze(0)
+        all_ids = torch.arange(src_model.config.vocab_size).unsqueeze(0)
         embeddings = src_model.tok_emb(all_ids)
-        deltas = src_model.delta_mlp.get_deltas(embeddings).squeeze(0)
+        deltas = src_model.delta_mlp(embeddings).squeeze(0)
 
     print(f"  Extracted frozen deltas from {source}")
     print(
@@ -325,17 +311,6 @@ def alibi_slopes(n_heads: int) -> Tensor:
     """
     ratio = 2.0 ** (-8.0 / n_heads)
     return torch.tensor([ratio ** (h + 1) for h in range(n_heads)])
-
-
-def causal_decay_mask(bias: Tensor, seq_len: int) -> Tensor:
-    """Apply causal masking (-inf above the diagonal) to a decay bias.
-
-    bias: (..., S, S) additive attention bias (<= 0 below diagonal).
-    """
-    causal = torch.tril(
-        torch.ones(seq_len, seq_len, dtype=torch.bool, device=bias.device)
-    )
-    return bias.masked_fill(~causal, float("-inf"))
 
 
 class ForgetMLP(nn.Module):
@@ -362,15 +337,15 @@ class ForgetMLP(nn.Module):
         h = F.gelu(self.fc1(x))
         return F.logsigmoid(self.fc2(h))
 
-    def decay_mask(self, x: Tensor) -> Tensor:
-        """Build the (B, H, S, S) additive causal+decay attention bias."""
+    def decay_bias(self, x: Tensor) -> Tensor:
+        """Build the (B, H, S, S) additive decay attention bias."""
         # (B,S,H) -> (B,H,S) so cumsum runs over the last (contiguous) dim.
         # A middle-dim scan trips a torch.compile/inductor codegen bug.
         la = self.log_alpha(x).float().permute(0, 2, 1).contiguous()  # (B, H, S)
         cum = torch.cumsum(la, dim=-1)  # A_t^h, decreasing
         # bias[b,h,i,j] = A_i^h - A_j^h  (<= 0 for i >= j)
         bias = cum.unsqueeze(3) - cum.unsqueeze(2)  # (B, H, S, S)
-        return causal_decay_mask(bias, x.shape[1])
+        return bias
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +395,8 @@ class Attention(nn.Module):
         self,
         x: Tensor,
         rope_freqs: Tensor,
-        batched_freqs: Tensor | None = None,
-        decay_mask: Tensor | None = None,
+        batched_freqs: Tensor | None,
+        attn_mask: Tensor,
     ) -> Tensor:
         """Forward pass with positional encoding.
 
@@ -430,10 +405,8 @@ class Attention(nn.Module):
             rope_freqs: (max_seq_len, head_dim//2) complex (for rope/pope)
             batched_freqs: (batch, seq_len, head_dim//2) complex
                            (for selective variants)
-            decay_mask: (batch_or_1, n_heads, seq_len, seq_len) additive
-                        attention bias combining causal masking + per-head
-                        decay (ALiBi or learned forget gate). When provided,
-                        replaces the built-in causal mask.
+            attn_mask: (batch, 1 or n_heads, seq_len, seq_len), from
+                       SelectivePETransformer._attention_mask
         """
         batch, seq_len, _ = x.shape
 
@@ -460,12 +433,9 @@ class Attention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        if decay_mask is not None:
-            out = F.scaled_dot_product_attention(
-                q, k, v, attn_mask=decay_mask.to(q.dtype), is_causal=False
-            )
-        else:
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        if attn_mask.is_floating_point():
+            attn_mask = attn_mask.to(q.dtype)
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
         out = out.transpose(1, 2).contiguous().view(batch, seq_len, -1)
         return self.resid_dropout(self.wo(out))
 
@@ -536,10 +506,10 @@ class TransformerBlock(nn.Module):
         self,
         x: Tensor,
         rope_freqs: Tensor,
-        batched_freqs: Tensor | None = None,
-        decay_mask: Tensor | None = None,
+        batched_freqs: Tensor | None,
+        attn_mask: Tensor,
     ) -> Tensor:
-        x = x + self.attn(self.attn_norm(x), rope_freqs, batched_freqs, decay_mask)
+        x = x + self.attn(self.attn_norm(x), rope_freqs, batched_freqs, attn_mask)
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
@@ -601,7 +571,8 @@ class SelectivePETransformer(nn.Module):
                         DeltaMLP(
                             config.dim,
                             config.effective_delta_hidden_dim,
-                            bounded=True,
+                            normalize_input=True,
+                            max_delta=config.max_delta,
                             n_heads=delta_heads,
                         )
                         for _ in range(config.n_layers)
@@ -627,26 +598,35 @@ class SelectivePETransformer(nn.Module):
             pos = torch.arange(config.max_seq_len)
             dist = (pos.unsqueeze(1) - pos.unsqueeze(0)).clamp(min=0).float()
             slopes = alibi_slopes(config.n_heads)  # (H,)
-            bias = -slopes[:, None, None] * dist[None, :, :]  # (H, S, S)
             self.register_buffer(
                 "alibi_bias",
-                causal_decay_mask(bias, config.max_seq_len),
+                -slopes[:, None, None] * dist[None, :, :],  # (H, S, S)
                 persistent=False,
             )
 
         if config.init_std is not None:
             self._init_weights(config.init_std)
 
-    def _decay_mask(self, x: Tensor, input_ids: Tensor) -> Tensor | None:
-        """Build the attention decay mask for the configured decay mode."""
+    def _attention_mask(self, x: Tensor, input_ids: Tensor) -> Tensor:
+        """Causal, document-masked attention mask, plus any decay bias.
+
+        EOS starts a document (it acts as BOS for the text after it), so no
+        token attends across a document boundary. Returns a (B, 1, S, S) bool
+        mask, or a (B, H, S, S) additive bias when decay is configured.
+        """
+        s = input_ids.shape[1]
+        doc = torch.cumsum(input_ids == self.config.eos_id, dim=1)
+        causal = torch.ones(s, s, dtype=torch.bool, device=x.device).tril()
+        allowed = ((doc.unsqueeze(2) == doc.unsqueeze(1)) & causal).unsqueeze(1)
         if self.config.decay == "learned":
             assert self.forget_mlp is not None
-            return self.forget_mlp.decay_mask(x)
-        if self.config.decay == "alibi":
+            bias = self.forget_mlp.decay_bias(x)
+        elif self.config.decay == "alibi":
             assert isinstance(self.alibi_bias, Tensor)
-            s = input_ids.shape[1]
-            return self.alibi_bias[:, :s, :s].unsqueeze(0)  # (1, H, S, S)
-        return None
+            bias = self.alibi_bias[:, :s, :s].unsqueeze(0)
+        else:
+            return allowed
+        return bias.masked_fill(~allowed, float("-inf"))
 
     def _init_weights(self, std: float) -> None:
         """Initialize weights with small normal distribution."""
@@ -672,71 +652,76 @@ class SelectivePETransformer(nn.Module):
             return [self.delta_mlp]
         return []
 
-    def _compute_batched_freqs(
-        self,
-        x: Tensor,
-        layer_idx: int | None = None,
-        input_ids: Tensor | None = None,
-    ) -> Tensor | None:
-        """Compute position frequencies for selective variants.
-
-        Args:
-            x: hidden states to compute positions from
-            layer_idx: if per-layer, which layer's DeltaMLP to use
-            input_ids: token IDs (used by FrozenDeltaLookup)
-
-        Returns:
-            (batch, seq_len, head_dim//2) complex, or None for standard PE
-        """
-        if not self._is_selective:
-            return None
-
+    def _deltas(self, x: Tensor, input_ids: Tensor, layer_idx: int) -> Tensor:
+        """Per-token deltas for one layer, (B,S) or (B,S,H) for per-head."""
         if self.frozen_delta is not None:
-            assert input_ids is not None
-            positions = self.frozen_delta(input_ids)
-        elif self.delta_mlps is not None:
-            assert layer_idx is not None
-            positions = self.delta_mlps[layer_idx](x)
-        elif self.delta_mlp is not None:
-            positions = self.delta_mlp(x)
-        else:
-            return None
+            return self.frozen_delta(input_ids)
+        if self.delta_mlps is not None:
+            return self.delta_mlps[layer_idx](x)
+        assert self.delta_mlp is not None
+        return self.delta_mlp(x)
 
-        return compute_rope_freqs_for_positions(
-            positions,
-            self.config.head_dim,
-            self.config.rope_theta,
-        )
-
-    def forward(self, input_ids: Tensor) -> Tensor:
-        """Forward pass returning logits.
+    def run(
+        self,
+        input_ids: Tensor,
+        *,
+        hook: Callable[[Tensor, int], Tensor] | None = None,
+        delta_override: Callable[[Tensor, int], Tensor] | None = None,
+    ) -> tuple[Tensor, list[Tensor], list[Tensor]]:
+        """Forward pass that exposes the residual stream and deltas.
 
         Args:
             input_ids: (batch, seq_len) token IDs
+            hook: called as hook(residual, layer_idx) after each layer; its
+                return value replaces the residual
+            delta_override: called as delta_override(deltas, layer_idx) before
+                each layer's positions are computed; its return value
+                replaces that layer's deltas (selective variants only)
 
         Returns:
             logits: (batch, seq_len, vocab_size)
+            residuals: per-layer (batch, seq_len, dim) post-hook residuals
+            deltas: per-layer deltas actually used (empty for non-selective)
         """
         x = self.tok_emb(input_ids)
-
-        # Shared delta: compute once from embeddings (or frozen lookup)
-        batched_freqs = (
-            self._compute_batched_freqs(x, input_ids=input_ids)
-            if not self.config.per_layer_delta
+        attn_mask = self._attention_mask(x, input_ids)
+        # The shared DeltaMLP reads the embeddings, so compute it once
+        shared = (
+            self._deltas(x, input_ids, 0)
+            if self._is_selective and not self.config.per_layer_delta
             else None
         )
-        # Decay (forget gate / ALiBi): one mask, shared across layers
-        decay_mask = self._decay_mask(x, input_ids)
 
+        residuals: list[Tensor] = []
+        used_deltas: list[Tensor] = []
         assert isinstance(self.rope_freqs, Tensor)
         for layer_idx, layer in enumerate(self.layers):
-            # Per-layer delta: compute from current hidden state
-            if self.config.per_layer_delta:
-                batched_freqs = self._compute_batched_freqs(x, layer_idx)
-            x = layer(x, self.rope_freqs, batched_freqs, decay_mask)
+            batched_freqs = None
+            if self._is_selective:
+                deltas = (
+                    shared
+                    if shared is not None
+                    else self._deltas(x, input_ids, layer_idx)
+                )
+                if delta_override is not None:
+                    deltas = delta_override(deltas, layer_idx)
+                used_deltas.append(deltas)
+                batched_freqs = compute_rope_freqs_for_positions(
+                    positions_from_deltas(deltas),
+                    self.config.head_dim,
+                    self.config.rope_theta,
+                )
+            x = layer(x, self.rope_freqs, batched_freqs, attn_mask)
+            if hook is not None:
+                x = hook(x, layer_idx)
+            residuals.append(x)
         x = self.final_norm(x)
         # Tied embeddings
-        return F.linear(x, self.tok_emb.weight)
+        return F.linear(x, self.tok_emb.weight), residuals, used_deltas
+
+    def forward(self, input_ids: Tensor) -> Tensor:
+        """(batch, seq_len) token IDs -> (batch, seq_len, vocab_size) logits."""
+        return self.run(input_ids)[0]
 
     def forward_with_layer_hooks(
         self,
@@ -749,66 +734,22 @@ class SelectivePETransformer(nn.Module):
             logits: (batch, seq_len, vocab_size)
             residuals: list of post-hook (batch, seq_len, dim) tensors
         """
-        residuals: list[Tensor] = []
-        x = self.tok_emb(input_ids)
-
-        batched_freqs = (
-            self._compute_batched_freqs(x, input_ids=input_ids)
-            if not self.config.per_layer_delta
-            else None
-        )
-        decay_mask = self._decay_mask(x, input_ids)
-
-        assert isinstance(self.rope_freqs, Tensor)
-        for layer_idx, layer in enumerate(self.layers):
-            if self.config.per_layer_delta:
-                batched_freqs = self._compute_batched_freqs(x, layer_idx)
-            x = layer(x, self.rope_freqs, batched_freqs, decay_mask)
-            x = hook(x, layer_idx)
-            residuals.append(x)
-        x = self.final_norm(x)
-        return F.linear(x, self.tok_emb.weight), residuals
+        logits, residuals, _ = self.run(input_ids, hook=hook)
+        return logits, residuals
 
     @torch.no_grad()
     def get_deltas(self, input_ids: Tensor) -> Tensor | None:
         """Return per-token position deltas for interpretability.
 
-        For shared delta: returns (batch, seq_len) from embedding layer.
-        For per-layer delta: returns (n_layers, batch, seq_len) by running
-        a forward pass and collecting each layer's deltas.
-
-        Args:
-            input_ids: (batch, seq_len) token IDs
-
-        Returns:
-            deltas tensor, or None if not a selective variant
+        Shared delta: (batch, seq_len[, H]). Per-layer delta:
+        (n_layers, batch, seq_len[, H]). None if not a selective variant.
         """
         if not self._is_selective:
             return None
-
-        if self.frozen_delta is not None:
-            return self.frozen_delta.get_deltas(input_ids)
-
-        if self.delta_mlp is not None:
-            # Shared: deltas from embeddings
-            x = self.tok_emb(input_ids)
-            return self.delta_mlp.get_deltas(x)
-
-        if self.delta_mlps is not None:
-            # Per-layer: run forward, collect deltas at each layer
-            x = self.tok_emb(input_ids)
-            layer_deltas: list[Tensor] = []
-            assert isinstance(self.rope_freqs, Tensor)
-            for layer_idx, layer in enumerate(self.layers):
-                delta_mlp = self.delta_mlps[layer_idx]
-                assert isinstance(delta_mlp, DeltaMLP)
-                deltas = delta_mlp.get_deltas(x)
-                layer_deltas.append(deltas)
-                batched_freqs = self._compute_batched_freqs(x, layer_idx)
-                x = layer(x, self.rope_freqs, batched_freqs)
-            return torch.stack(layer_deltas)  # (n_layers, B, S)
-
-        return None
+        deltas = self.run(input_ids)[2]
+        if self.config.per_layer_delta:
+            return torch.stack(deltas)
+        return deltas[0]
 
     def install_frozen_deltas(self, frozen_deltas: Tensor) -> None:
         """Replace the learned DeltaMLP with a frozen lookup table.

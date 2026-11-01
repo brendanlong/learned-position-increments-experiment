@@ -29,6 +29,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pyright>=1.1",
+    "pytest>=9.1.1",
     "ruff>=0.9",
     "skypilot[aws,kubernetes,runpod]>=0.12.0",
 ]

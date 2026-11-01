@@ -35,6 +35,9 @@ class SelectivePEModelConfig(BaseModel):
     # Selective PE config
     delta_hidden_dim: int | None = None  # MLP hidden dim; None = dim // 4
     per_layer_delta: bool = False  # Per-layer DeltaMLPs (vs shared)
+    # Sigmoid bound on deltas; None = unbounded softplus. Only set when
+    # loading the bounded per-layer checkpoints behind the blog post.
+    max_delta: float | None = None
     # Per-head delta: each head gets its own learned position rate (per-head
     # RoPE frequency scaling). Composes with per_layer_delta.
     per_head_delta: bool = False
@@ -62,6 +65,12 @@ class SelectivePEModelConfig(BaseModel):
     @property
     def head_dim(self) -> int:
         return self.dim // self.n_heads
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def eos_id(self) -> int:
+        # Both tokenizers put EOS last (GPT2_EOS_ID, BYTE_EOS_ID)
+        return self.vocab_size - 1
 
     @computed_field  # type: ignore[prop-decorator]
     @property

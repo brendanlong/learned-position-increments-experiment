@@ -33,7 +33,7 @@ import numpy as np
 import torch
 
 from experiments.selective_pe.config import BYTE_EOS_ID, SelectivePEModelConfig
-from experiments.selective_pe.model import SelectivePETransformer
+from experiments.selective_pe.model import SelectivePETransformer, load_checkpoint
 
 DEFAULT_EN = "Marie Curie, a Polish-born physicist, won two Nobel Prizes."
 DEFAULT_ZH = "人工智能是计算机科学的一个分支。"
@@ -57,15 +57,6 @@ def find_cjk_font() -> fm.FontProperties | None:
         if Path(path).exists():
             return fm.FontProperties(fname=path)
     return None
-
-
-def load_model(path: str) -> tuple[SelectivePETransformer, SelectivePEModelConfig]:
-    ckpt = torch.load(path, weights_only=True)
-    cfg = SelectivePEModelConfig(**ckpt["model_config"])
-    model = SelectivePETransformer(cfg)
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    return model, cfg
 
 
 @torch.no_grad()
@@ -179,7 +170,8 @@ def main() -> None:
     texts = [(args.label_en, args.en), (args.label_zh, args.zh)]
 
     if args.shared:
-        model, cfg = load_model(args.shared)
+        model = load_checkpoint(args.shared)
+        cfg = model.config
         for tag, text in texts:
             incr = char_increments(model, cfg, text)
             plot_rows(
@@ -192,7 +184,8 @@ def main() -> None:
             )
 
     if args.per_layer:
-        model, cfg = load_model(args.per_layer)
+        model = load_checkpoint(args.per_layer)
+        cfg = model.config
         labels = [f"L{i}" for i in range(cfg.n_layers)]
         shared_scale = args.scale == "shared"
         for tag, text in texts:

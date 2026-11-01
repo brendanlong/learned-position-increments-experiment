@@ -35,24 +35,20 @@ from torch import Tensor
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-from experiments.selective_pe.config import SelectivePEModelConfig
+    from experiments.selective_pe.config import SelectivePEModelConfig
+
 from experiments.selective_pe.data import _load_texts
-from experiments.selective_pe.model import DeltaMLP, SelectivePETransformer
+from experiments.selective_pe.model import (
+    DeltaMLP,
+    SelectivePETransformer,
+    load_checkpoint,
+)
 
 CJK_LO, CJK_HI = 0x4E00, 0x9FFF  # CJK Unified Ideographs
 
 
 def is_cjk(ch: str) -> bool:
     return CJK_LO <= ord(ch) <= CJK_HI
-
-
-def load_model(path: str) -> tuple[SelectivePETransformer, SelectivePEModelConfig]:
-    ckpt = torch.load(path, weights_only=True)
-    cfg = SelectivePEModelConfig(**ckpt["model_config"])
-    model = SelectivePETransformer(cfg)
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    return model, cfg
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +86,7 @@ def embedding_delta_mlp(
 @torch.no_grad()
 def per_byte_table(model: SelectivePETransformer, cfg: SelectivePEModelConfig) -> None:
     ids = torch.arange(cfg.vocab_size).unsqueeze(0)
-    deltas = embedding_delta_mlp(model, cfg).get_deltas(model.tok_emb(ids)).squeeze(0)
+    deltas = embedding_delta_mlp(model, cfg)(model.tok_emb(ids)).squeeze(0)
     print(f"{'category':<40}{'min':>8}{'max':>8}{'mean':>8}")
     for name, byte_ids in BYTE_CATEGORIES.items():
         vals = deltas[torch.tensor([b for b in byte_ids if b < cfg.vocab_size])]
@@ -192,7 +188,8 @@ def main() -> None:
     for label, path in [("SHARED", args.shared), ("PER-LAYER", args.per_layer)]:
         if not path:
             continue
-        model, cfg = load_model(path)
+        model = load_checkpoint(path)
+        cfg = model.config
         print(f"\n{'=' * 64}\n{label}: {path}\n{'=' * 64}")
         print("\n--- Part 1: per-byte increment by category ---")
         per_byte_table(model, cfg)

@@ -52,7 +52,7 @@ import torch
 from scipy.stats import wilcoxon
 
 from experiments.selective_pe.config import BYTE_EOS_ID, SelectivePEModelConfig
-from experiments.selective_pe.model import SelectivePETransformer
+from experiments.selective_pe.model import SelectivePETransformer, load_checkpoint
 
 # Two-word, ASCII, capitalized named entities (countries, cities, people,
 # institutions, places). Reversed order is used as the within-pair control.
@@ -150,15 +150,6 @@ CARRIERS: list[str] = [
 ]
 
 
-def load_model(path: str) -> tuple[SelectivePETransformer, SelectivePEModelConfig]:
-    ckpt = torch.load(path, weights_only=True)
-    cfg = SelectivePEModelConfig(**ckpt["model_config"])
-    model = SelectivePETransformer(cfg)
-    model.load_state_dict(ckpt["model_state_dict"])
-    model.eval()
-    return model, cfg
-
-
 @torch.no_grad()
 def internal_space_delta(
     model: SelectivePETransformer,
@@ -225,10 +216,12 @@ def main() -> None:
     p.add_argument("--per-layer", help="per-layer-delta checkpoint")
     args = p.parse_args()
     if args.shared:
-        model, cfg = load_model(args.shared)
+        model = load_checkpoint(args.shared)
+        cfg = model.config
         analyze(model, cfg, "SHARED (byte identity -> should not distinguish)")
     if args.per_layer:
-        model, cfg = load_model(args.per_layer)
+        model = load_checkpoint(args.per_layer)
+        cfg = model.config
         analyze(model, cfg, "PER-LAYER")
 
 

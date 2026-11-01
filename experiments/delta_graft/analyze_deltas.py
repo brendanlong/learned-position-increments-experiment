@@ -92,7 +92,7 @@ def main() -> None:
     state = ckpt["delta_mlp_state_dict"]
     in_dim = state["fc1.weight"].shape[1]
     hidden_dim = state["fc1.weight"].shape[0]
-    delta = DeltaMLP(in_dim, hidden_dim, bounded=False, n_heads=1)
+    delta = DeltaMLP(in_dim, hidden_dim)
     delta.load_state_dict(state)
     delta.eval()
 
@@ -103,7 +103,7 @@ def main() -> None:
 
     with torch.no_grad():
         ids = torch.arange(vocab).unsqueeze(0)
-        deltas = delta.get_deltas(emb(ids)).squeeze(0)  # (vocab,)
+        deltas = delta(emb(ids)).squeeze(0)  # (vocab,)
 
     print(f"checkpoint: {args.checkpoint}")
     print(f"final_metrics: {ckpt.get('final_metrics')}")
