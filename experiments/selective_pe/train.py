@@ -74,6 +74,11 @@ def main() -> None:
         help="Use per-layer DeltaMLPs instead of shared (for selective variants)",
     )
     parser.add_argument(
+        "--no-doc-mask",
+        action="store_true",
+        help="Let attention cross EOS (control for document masking)",
+    )
+    parser.add_argument(
         "--per-head-delta",
         action="store_true",
         help="Per-head learned position rates (per-head RoPE frequency scaling)",
@@ -207,6 +212,7 @@ def main() -> None:
         activation=args.activation,
         vocab_size=vocab_size,
         per_layer_delta=args.per_layer_delta,
+        doc_mask=not args.no_doc_mask,
         per_head_delta=args.per_head_delta,
         decay=args.decay,
     )

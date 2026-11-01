@@ -49,6 +49,9 @@ class SelectivePEModelConfig(BaseModel):
     #               cumulative log-alpha becomes the additive decay bias.
     # Both decay modes are per-head and shared across layers.
     decay: Literal["none", "alibi", "learned"] = "none"
+    # Block attention across EOS (document boundaries). False only for the
+    # no-masking control and checkpoints trained before masking existed.
+    doc_mask: bool = True
 
     @model_validator(mode="after")
     def _validate_architecture(self) -> "SelectivePEModelConfig":
@@ -95,6 +98,7 @@ def selective_pe_model_config(
     per_layer_delta: bool = False,
     per_head_delta: bool = False,
     decay: Literal["none", "alibi", "learned"] = "none",
+    doc_mask: bool = True,
 ) -> SelectivePEModelConfig:
     """Create model config with sensible defaults for selective PE experiments."""
     return SelectivePEModelConfig(
@@ -113,6 +117,7 @@ def selective_pe_model_config(
         per_layer_delta=per_layer_delta,
         per_head_delta=per_head_delta,
         decay=decay,
+        doc_mask=doc_mask,
     )
 
 

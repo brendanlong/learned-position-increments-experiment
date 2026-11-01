@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 import torch
 from torch import Tensor
@@ -6,7 +8,7 @@ from experiments.selective_pe.config import BYTE_EOS_ID, selective_pe_model_conf
 from experiments.selective_pe.model import SelectivePETransformer
 
 
-def _model(**kwargs: object) -> SelectivePETransformer:
+def _model(kwargs: dict[str, Any]) -> SelectivePETransformer:
     torch.manual_seed(0)
     config = selective_pe_model_config(
         dim=32, n_heads=4, n_layers=2, vocab_size=257, max_seq_len=64, **kwargs
@@ -28,8 +30,8 @@ def _model(**kwargs: object) -> SelectivePETransformer:
         {"pos_encoding": "rope", "decay": "alibi"},
     ],
 )
-def test_documents_do_not_see_each_other(kwargs: dict[str, object]) -> None:
-    model = _model(**kwargs)
+def test_documents_do_not_see_each_other(kwargs: dict[str, Any]) -> None:
+    model = _model(kwargs)
     doc_b = torch.randint(0, 256, (10,))
     with torch.no_grad():
         logits = [
@@ -46,8 +48,8 @@ def test_documents_do_not_see_each_other(kwargs: dict[str, object]) -> None:
 
 
 def test_unit_deltas_match_integer_rope() -> None:
-    selective = _model(pos_encoding="selective_rope", per_layer_delta=True)
-    rope = _model(pos_encoding="rope")
+    selective = _model(dict(pos_encoding="selective_rope", per_layer_delta=True))
+    rope = _model(dict(pos_encoding="rope"))
     rope.load_state_dict(selective.state_dict(), strict=False)
     ids = torch.randint(0, 257, (2, 40))
 
@@ -62,7 +64,7 @@ def test_unit_deltas_match_integer_rope() -> None:
 
 
 def test_deltas_are_causal() -> None:
-    model = _model(pos_encoding="selective_rope", per_layer_delta=True)
+    model = _model(dict(pos_encoding="selective_rope", per_layer_delta=True))
     ids = torch.randint(0, 256, (1, 40))
     changed = ids.clone()
     changed[0, 30] = (ids[0, 30] + 1) % 256
@@ -72,3 +74,16 @@ def test_deltas_are_causal() -> None:
     assert (deltas > 0).all()
     torch.testing.assert_close(deltas[..., :30], changed_deltas[..., :30])
     assert not torch.allclose(deltas[..., 30:], changed_deltas[..., 30:])
+
+
+def test_without_doc_mask_documents_see_each_other() -> None:
+    model = _model(
+        dict(pos_encoding="selective_rope", per_layer_delta=True, doc_mask=False)
+    )
+    doc_b = torch.cat([torch.tensor([BYTE_EOS_ID]), torch.randint(0, 256, (10,))])
+    with torch.no_grad():
+        a, b = (
+            model(torch.cat([torch.randint(0, 256, (12,)), doc_b])[None])
+            for _ in range(2)
+        )
+    assert not torch.allclose(a[0, 12:], b[0, 12:])

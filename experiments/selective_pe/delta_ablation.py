@@ -21,6 +21,7 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from experiments.selective_pe.byte_boundary_analysis import BYTE_CATEGORIES
+from experiments.selective_pe.config import BYTE_VOCAB_SIZE
 from experiments.selective_pe.data import FixedChunkDataset, prepare_byte_corpus
 from experiments.selective_pe.model import SelectivePETransformer, load_checkpoint
 
@@ -32,7 +33,9 @@ def layer_mean_deltas(model: SelectivePETransformer, batches: list[Tensor]) -> T
     """(n_layers, n_heads_or_1) mean delta over all eval tokens."""
     per_batch = []
     for ids in batches:
-        deltas = torch.stack(model.run(ids)[2])  # (L, B, S[, H])
+        # Same autocast as per_token_loss, so later layers see the same inputs
+        with torch.autocast(ids.device.type, dtype=torch.bfloat16):
+            deltas = torch.stack(model.run(ids)[2])  # (L, B, S[, H])
         if deltas.dim() == 3:
             deltas = deltas.unsqueeze(-1)
         per_batch.append(deltas.mean(dim=(1, 2)))
@@ -82,6 +85,7 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = load_checkpoint(args.checkpoint).to(device)
+    assert model.config.vocab_size == BYTE_VOCAB_SIZE, "byte-level checkpoints only"
     n_layers = model.config.n_layers
 
     # Same val windows the training loop evaluates on

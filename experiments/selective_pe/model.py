@@ -266,10 +266,13 @@ def load_checkpoint(source: str) -> "SelectivePETransformer":
     """Load a model in eval mode from a local path or "wandb:..." artifact."""
     ckpt = torch.load(_resolve_checkpoint_path(source), weights_only=True)
     model_config = ckpt["model_config"]
-    # Per-layer checkpoints from before max_delta was configurable were
-    # trained with a sigmoid bound of 10 (the blog post's models).
-    if "max_delta" not in model_config and model_config.get("per_layer_delta"):
-        model_config["max_delta"] = 10.0
+    # Checkpoints from before these were configurable (the blog post's models)
+    # were trained without document masking, and per-layer ones with a sigmoid
+    # bound of 10.
+    if "max_delta" not in model_config:
+        model_config["doc_mask"] = False
+        if model_config.get("per_layer_delta"):
+            model_config["max_delta"] = 10.0
     model = SelectivePETransformer(SelectivePEModelConfig(**model_config))
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
@@ -608,16 +611,19 @@ class SelectivePETransformer(nn.Module):
             self._init_weights(config.init_std)
 
     def _attention_mask(self, x: Tensor, input_ids: Tensor) -> Tensor:
-        """Causal, document-masked attention mask, plus any decay bias.
+        """Causal (and, with doc_mask, document) attention mask plus any decay.
 
-        EOS starts a document (it acts as BOS for the text after it), so no
-        token attends across a document boundary. Returns a (B, 1, S, S) bool
-        mask, or a (B, H, S, S) additive bias when decay is configured.
+        EOS starts a document (it acts as BOS for the text after it), so with
+        doc_mask no token attends across a document boundary. Returns a
+        (B or 1, 1, S, S) bool mask, or a (B, H, S, S) additive bias when decay
+        is configured.
         """
         s = input_ids.shape[1]
-        doc = torch.cumsum(input_ids == self.config.eos_id, dim=1)
-        causal = torch.ones(s, s, dtype=torch.bool, device=x.device).tril()
-        allowed = ((doc.unsqueeze(2) == doc.unsqueeze(1)) & causal).unsqueeze(1)
+        allowed = torch.ones(s, s, dtype=torch.bool, device=x.device).tril()
+        if self.config.doc_mask:
+            doc = torch.cumsum(input_ids == self.config.eos_id, dim=1)
+            allowed = (doc.unsqueeze(2) == doc.unsqueeze(1)) & allowed
+        allowed = allowed.unsqueeze(-3) if allowed.dim() == 3 else allowed[None, None]
         if self.config.decay == "learned":
             assert self.forget_mlp is not None
             bias = self.forget_mlp.decay_bias(x)
