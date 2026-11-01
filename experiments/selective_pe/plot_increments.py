@@ -126,8 +126,13 @@ def plot_rows(
         y = n_rows - 1 - r
         for i, ch in enumerate(text):
             ax.text(
-                pos[r, i], y, ch, ha="left", va="center",
-                fontsize=15, fontproperties=font,
+                pos[r, i],
+                y,
+                ch,
+                ha="left",
+                va="center",
+                fontsize=15,
+                fontproperties=font,
             )
     if n_rows > 1:
         ys = [n_rows - 1 - r for r in range(n_rows)]
@@ -178,9 +183,12 @@ def main() -> None:
         for tag, text in texts:
             incr = char_increments(model, cfg, text)
             plot_rows(
-                text, incr, ["shared"],
+                text,
+                incr,
+                ["shared"],
                 f"Learned position increments (shared model) - {tag}",
-                out / f"shared_{tag}.png", font,
+                out / f"shared_{tag}.png",
+                font,
             )
 
     if args.per_layer:
@@ -190,9 +198,12 @@ def main() -> None:
         for tag, text in texts:
             incr = char_increments(model, cfg, text, shared_scale=shared_scale)
             plot_rows(
-                text, incr, labels,
+                text,
+                incr,
+                labels,
                 f"Learned position increments per layer - {tag}",
-                out / f"perlayer_{tag}_{args.scale}.png", font,
+                out / f"perlayer_{tag}_{args.scale}.png",
+                font,
             )
 
 

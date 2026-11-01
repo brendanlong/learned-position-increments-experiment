@@ -50,8 +50,26 @@ def categorize(tok: str) -> str:
     if stripped in {",", ";", ":", "—", "-", "(", ")", '"', "'", "’", "”", "“"}:  # noqa: RUF001
         return "other_punct"
     if stripped.lower() in {
-        "the", "a", "an", "of", "to", "and", "in", "is", "it", "that",
-        "for", "on", "as", "with", "was", "at", "by", "be", "this", "or",
+        "the",
+        "a",
+        "an",
+        "of",
+        "to",
+        "and",
+        "in",
+        "is",
+        "it",
+        "that",
+        "for",
+        "on",
+        "as",
+        "with",
+        "was",
+        "at",
+        "by",
+        "be",
+        "this",
+        "or",
     }:
         return "function_word"
     if not s.startswith(" ") and stripped.isalpha():
@@ -99,8 +117,10 @@ def main() -> None:
     exp_ids = torch.where(exploded)[0][:5]
     exp_examples = [tok.convert_ids_to_tokens(int(i)) for i in exp_ids]
     print(f"\nunused-token artifacts (delta>2): {n_exp} tokens (e.g. {exp_examples})")
-    print(f"regularized delta: median={finite.median():.4f} mean={finite.mean():.4f} "
-          f"std={finite.std():.4f} min={finite.min():.4f} max={finite.max():.4f}\n")
+    print(
+        f"regularized delta: median={finite.median():.4f} mean={finite.mean():.4f} "
+        f"std={finite.std():.4f} min={finite.min():.4f} max={finite.max():.4f}\n"
+    )
 
     eos = tok.eos_token_id
     if eos is not None:
