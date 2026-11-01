@@ -3,9 +3,10 @@ from typing import Any
 import pytest
 import torch
 from torch import Tensor
+from torch.nn.attention.flex_attention import flex_attention
 
 from experiments.selective_pe.config import BYTE_EOS_ID, selective_pe_model_config
-from experiments.selective_pe.model import SelectivePETransformer
+from experiments.selective_pe.model import SelectivePETransformer, alibi_slopes
 from experiments.selective_pe.training import optimizer_param_groups
 
 
@@ -101,3 +102,38 @@ def test_weight_decay_only_on_weight_matrices() -> None:
     assert "tok_emb.weight" not in names
     n_params = len(list(model.parameters()))
     assert len(decay["params"]) + len(no_decay["params"]) == n_params  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("decay", ["none", "alibi", "learned"])
+def test_attention_mask_matches_dense_reference(decay: str) -> None:
+    model = _model(dict(pos_encoding="selective_rope", decay=decay))
+    ids = torch.randint(0, 256, (2, 20))
+    ids[0, 7] = BYTE_EOS_ID
+    x = model.tok_emb(ids)
+    q, k, v = (torch.randn(2, 4, 20, 8) for _ in range(3))
+    mask = model._attention_mask(x, ids)
+    out = flex_attention(q, k, v, score_mod=mask.score_mod, block_mask=mask.block_mask)
+
+    doc = torch.cumsum(ids == BYTE_EOS_ID, dim=1)
+    allowed = (doc[:, :, None] == doc[:, None, :]) & torch.ones(20, 20).tril().bool()
+    bias = torch.zeros(2, 4, 20, 20)
+    pos = torch.arange(20)
+    if decay == "alibi":
+        bias = -alibi_slopes(4)[:, None, None] * (pos[:, None] - pos[None, :])
+    elif decay == "learned":
+        assert model.forget_mlp is not None
+        cum = model.forget_mlp.cumulative_log_alpha(x)
+        bias = cum[..., :, None] - cum[..., None, :]
+    bias = bias.masked_fill(~allowed[:, None], float("-inf"))
+    expected = torch.nn.functional.scaled_dot_product_attention(
+        q, k, v, attn_mask=bias.expand(2, 4, 20, 20)
+    )
+    torch.testing.assert_close(out, expected)
+
+
+def test_learned_decay_gets_gradients() -> None:
+    model = _model(dict(pos_encoding="rope", decay="learned"))
+    model(torch.randint(0, 256, (2, 20))).sum().backward()
+    assert model.forget_mlp is not None
+    grad = model.forget_mlp.fc2.weight.grad
+    assert grad is not None and grad.abs().sum() > 0

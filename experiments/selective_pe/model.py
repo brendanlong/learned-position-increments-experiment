@@ -13,10 +13,16 @@ real-valued positions, either shared across layers or per-layer.
 
 import math
 from collections.abc import Callable
+from typing import NamedTuple
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.nn.attention.flex_attention import (
+    BlockMask,
+    create_block_mask,
+    flex_attention,
+)
 
 from experiments.selective_pe.config import SelectivePEModelConfig
 
@@ -344,20 +350,25 @@ class ForgetMLP(nn.Module):
         h = F.gelu(self.fc1(x))
         return F.logsigmoid(self.fc2(h))
 
-    def decay_bias(self, x: Tensor) -> Tensor:
-        """Build the (B, H, S, S) additive decay attention bias."""
+    def cumulative_log_alpha(self, x: Tensor) -> Tensor:
+        """A_t^h, (B, H, S); the decay bias for query i, key j is A_i - A_j."""
         # (B,S,H) -> (B,H,S) so cumsum runs over the last (contiguous) dim.
         # A middle-dim scan trips a torch.compile/inductor codegen bug.
-        la = self.log_alpha(x).float().permute(0, 2, 1).contiguous()  # (B, H, S)
-        cum = torch.cumsum(la, dim=-1)  # A_t^h, decreasing
-        # bias[b,h,i,j] = A_i^h - A_j^h  (<= 0 for i >= j)
-        bias = cum.unsqueeze(3) - cum.unsqueeze(2)  # (B, H, S, S)
-        return bias
+        la = self.log_alpha(x).float().permute(0, 2, 1).contiguous()
+        return torch.cumsum(la, dim=-1)
 
 
 # ---------------------------------------------------------------------------
 # Model components
 # ---------------------------------------------------------------------------
+
+
+ScoreMod = Callable[[Tensor, Tensor, Tensor, Tensor, Tensor], Tensor]
+
+
+class AttentionMask(NamedTuple):
+    block_mask: BlockMask
+    score_mod: ScoreMod | None
 
 
 def _create_norm(config: SelectivePEModelConfig) -> nn.Module:
@@ -408,7 +419,7 @@ class Attention(nn.Module):
         x: Tensor,
         rope_freqs: Tensor,
         batched_freqs: Tensor | None,
-        attn_mask: Tensor,
+        attn_mask: AttentionMask,
     ) -> Tensor:
         """Forward pass with positional encoding.
 
@@ -417,8 +428,7 @@ class Attention(nn.Module):
             rope_freqs: (max_seq_len, head_dim//2) complex (for rope/pope)
             batched_freqs: (batch, seq_len, head_dim//2) complex
                            (for selective variants)
-            attn_mask: (batch, 1 or n_heads, seq_len, seq_len), from
-                       SelectivePETransformer._attention_mask
+            attn_mask: from SelectivePETransformer._attention_mask
         """
         batch, seq_len, _ = x.shape
 
@@ -445,9 +455,10 @@ class Attention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        if attn_mask.is_floating_point():
-            attn_mask = attn_mask.to(q.dtype)
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
+        out = flex_attention(
+            q, k, v, score_mod=attn_mask.score_mod, block_mask=attn_mask.block_mask
+        )
+        assert isinstance(out, Tensor)
         out = out.transpose(1, 2).contiguous().view(batch, seq_len, -1)
         return self.resid_dropout(self.wo(out))
 
@@ -519,7 +530,7 @@ class TransformerBlock(nn.Module):
         x: Tensor,
         rope_freqs: Tensor,
         batched_freqs: Tensor | None,
-        attn_mask: Tensor,
+        attn_mask: AttentionMask,
     ) -> Tensor:
         x = x + self.attn(self.attn_norm(x), rope_freqs, batched_freqs, attn_mask)
         x = x + self.ffn(self.ffn_norm(x))
@@ -604,44 +615,57 @@ class SelectivePETransformer(nn.Module):
                 config.dim, config.effective_delta_hidden_dim, config.n_heads
             )
         elif config.decay == "alibi":
-            # Fixed per-head ALiBi bias: (H, max_seq_len, max_seq_len).
-            # dist[i,j] = i - j (>=0 for past keys j<=i; 0 above the diagonal,
-            # which is masked to -inf anyway).
-            pos = torch.arange(config.max_seq_len)
-            dist = (pos.unsqueeze(1) - pos.unsqueeze(0)).clamp(min=0).float()
-            slopes = alibi_slopes(config.n_heads)  # (H,)
             self.register_buffer(
-                "alibi_bias",
-                -slopes[:, None, None] * dist[None, :, :],  # (H, S, S)
-                persistent=False,
+                "alibi_slopes", alibi_slopes(config.n_heads), persistent=False
             )
 
         if config.init_std is not None:
             self._init_weights(config.init_std)
 
-    def _attention_mask(self, x: Tensor, input_ids: Tensor) -> Tensor:
+    def _attention_mask(self, x: Tensor, input_ids: Tensor) -> AttentionMask:
         """Causal (and, with doc_mask, document) attention mask plus any decay.
 
         EOS starts a document (it acts as BOS for the text after it), so with
-        doc_mask no token attends across a document boundary. Returns a
-        (B or 1, 1, S, S) bool mask, or a (B, H, S, S) additive bias when decay
-        is configured.
+        doc_mask no token attends across a document boundary.
         """
-        s = input_ids.shape[1]
-        allowed = torch.ones(s, s, dtype=torch.bool, device=x.device).tril()
+        batch, s = input_ids.shape
         if self.config.doc_mask:
             doc = torch.cumsum(input_ids == self.config.eos_id, dim=1)
-            allowed = (doc.unsqueeze(2) == doc.unsqueeze(1)) & allowed
-        allowed = allowed.unsqueeze(-3) if allowed.dim() == 3 else allowed[None, None]
+
+            def mask_mod(b: Tensor, h: Tensor, q: Tensor, kv: Tensor) -> Tensor:
+                return (q >= kv) & (doc[b, q] == doc[b, kv])
+
+            block_mask = create_block_mask(mask_mod, batch, None, s, s, x.device)
+        else:
+
+            def causal(b: Tensor, h: Tensor, q: Tensor, kv: Tensor) -> Tensor:
+                return q >= kv
+
+            block_mask = create_block_mask(causal, None, None, s, s, x.device)
+
+        score_mod: ScoreMod | None = None
         if self.config.decay == "learned":
             assert self.forget_mlp is not None
-            bias = self.forget_mlp.decay_bias(x)
+            cum = self.forget_mlp.cumulative_log_alpha(x)  # (B, H, S)
+
+            def learned_decay(
+                score: Tensor, b: Tensor, h: Tensor, q: Tensor, kv: Tensor
+            ) -> Tensor:
+                return score + cum[b, h, q] - cum[b, h, kv]
+
+            score_mod = learned_decay
         elif self.config.decay == "alibi":
-            assert isinstance(self.alibi_bias, Tensor)
-            bias = self.alibi_bias[:, :s, :s].unsqueeze(0)
-        else:
-            return allowed
-        return bias.masked_fill(~allowed, float("-inf"))
+            slopes = self.alibi_slopes
+            assert isinstance(slopes, Tensor)
+
+            def alibi(
+                score: Tensor, b: Tensor, h: Tensor, q: Tensor, kv: Tensor
+            ) -> Tensor:
+                return score - slopes[h] * (q - kv)
+
+            score_mod = alibi
+
+        return AttentionMask(block_mask, score_mod)
 
     def _init_weights(self, std: float) -> None:
         """Initialize weights with small normal distribution."""
