@@ -541,16 +541,57 @@ two-sided Wilcoxon p):
 | L5 | 1e-7 | 2e-8 | 6e-9 | 1e-6 |
 
 This is the most robust contextual result: real-order entities get a smaller
-internal-space delta in L2/L3/L5 in all three masked seeds. (As before, this
-measures the model's forward expectation that the word continues; the
-next-byte-uncertainty baseline below would show how much more it is.)
+internal-space delta in L2/L3/L5 in all three masked seeds.
+
+### Is delta more than the model's own uncertainty?
+
+Word boundaries are where the next character is hardest to predict, and "New"
+predicts "York" much better than "York" predicts "New". So both results could
+be the model's ordinary next-byte uncertainty showing up in the deltas. The
+analysis scripts now compute that uncertainty from the same forward pass.
+
+**Chinese word boundaries.** Single-feature AUC of the model's next-byte
+entropy just before each gap, and cross-validated AUC (logistic regression,
+5 folds grouped by 512-byte window) on uncertainty (entropy + next-character
+surprisal), on all six layers' log delta, and on both:
+
+| model | entropy alone | uncertainty | log delta | both | gain from delta |
+|---|---|---|---|---|---|
+| masked s42 | 0.862 | 0.876 | 0.621 | 0.882 | +0.006 |
+| masked s1 | 0.862 | 0.876 | 0.810 | 0.907 | +0.031 |
+| masked s2 | 0.860 | 0.875 | 0.720 | 0.886 | +0.011 |
+| control (no mask) | 0.862 | 0.877 | 0.647 | 0.884 | +0.007 |
+| blog replica | 0.860 | 0.876 | 0.750 | 0.891 | +0.015 |
+
+The model's own uncertainty separates word boundaries far better (0.86) than
+any layer's delta ever did (best single layer 0.72). Deltas add 0.006–0.031
+AUC on top, so they carry a little boundary information beyond uncertainty,
+but mostly they re-express it.
+
+**Multi-word entities.** At the internal space the model is already much more
+confident in the real order: log p(second word) is about −4 for real entities
+vs −9 reversed, and next-byte entropy is lower (2.5 vs 2.9–3.0 nats). Repeating
+the paired test on the part of log delta a linear fit on those two doesn't
+explain (two-sided Wilcoxon p; 6 tests per model, so Bonferroni 0.0083):
+
+| layer | s42 | s1 | s2 | control | blog replica |
+|---|---|---|---|---|---|
+| L1 | 0.18 | 0.28 | 0.95 | 0.77 | 0.49 |
+| L2 | 0.11 | 0.049 | 0.25 | 0.38 | 0.36 |
+| L3 | 0.23 | 0.55 | 0.49 | 0.077 | 0.78 |
+| L4 | 0.82 | **0.0038** | 0.093 | 0.35 | 0.29 |
+| L5 | 0.022 | 0.068 | **0.0075** | 0.019 | **0.0014** |
+
+Most of the entity effect is the model's forward expectation. What survives is
+in the slow, word-grouping layer (L5, or L4 in s1, the layer whose speed
+collapses to ≈ 0.05–0.09): it passes Bonferroni in 3 of 5 models and is
+p ≤ 0.022 in the other two. The fit uses final-output uncertainty and is
+linear, so a residual effect could still be uncertainty the fit misses.
 
 ### Not done yet
 
-- A next-byte-uncertainty baseline for the jieba AUC and the entity test (is
-  the delta more informative than the model's own predictive entropy at that
-  position?).
-- More than one seed for the control and the RoPE baseline.
+- More than one seed for the RoPE baseline.
+- A frequency-matched non-entity bigram control for the entity test.
 
 ## Overall Conclusions
 
