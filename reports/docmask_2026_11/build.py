@@ -93,15 +93,19 @@ COLOR = {
 }
 
 
+def search(pattern: str, text: str, flags: int = 0) -> re.Match[str]:
+    m = re.search(pattern, text, flags)
+    assert m is not None, pattern
+    return m
+
+
 def label(key: str) -> str:
     return MODELS[key][0]
 
 
 def parse_ablation(stem: str) -> dict:
     text = (A / f"ablation_{stem}.txt").read_text()
-    speed = [
-        float(x) for x in re.search(r"^speed\s+(.*)$", text, re.M).group(1).split()
-    ]
+    speed = [float(x) for x in search(r"^speed\s+(.*)$", text, re.M).group(1).split()]
     rows = {}
     for m in re.finditer(
         r"^(learned|all layers = \w+|L\d+ = \w+)\s+([\d.]+) \(([+-][\d.]+)\)",
@@ -127,9 +131,7 @@ def parse_boundary(key: str) -> dict:
     text = boundary_section(key)
 
     def num(name: str) -> float:
-        return float(
-            re.search(rf"^\s+{re.escape(name)}\s+([\d.]+)", text, re.M).group(1)
-        )
+        return float(search(rf"^\s+{re.escape(name)}\s+([\d.]+)", text, re.M).group(1))
 
     layers = [
         float(x)
@@ -142,7 +144,7 @@ def parse_boundary(key: str) -> dict:
         "uncertainty": num("uncertainty"),
         "delta": num("all-layer log delta"),
         "both": num("uncertainty + log delta"),
-        "gaps": int(re.search(r"gaps=(\d+)", text).group(1)),
+        "gaps": int(search(r"gaps=(\d+)", text).group(1)),
     }
 
 
@@ -153,7 +155,7 @@ def parse_entity(key: str) -> dict:
         text = text[text.index("PER-LAYER") :]
     else:
         text = (A / f"entity_{stem}.txt").read_text()
-    lp = re.search(r"log p\(second word\): real ([-\d.]+), reversed ([-\d.]+)", text)
+    lp = search(r"log p\(second word\): real ([-\d.]+), reversed ([-\d.]+)", text)
     rows = []
     for m in re.finditer(
         r"^(L\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.e+-]+)\s+([\d.e+-]+)$",
@@ -546,7 +548,7 @@ def fig_ablation(abl: dict) -> str:
             for name, v in rows.items()
             if name.startswith("L") and name.endswith("speed")
         }
-        worst = max(single, key=single.get)
+        worst = max(single, key=lambda n: single[n])
         for name, key, c in conds:
             v = rows[key] if key else single[worst]
             what = name if key else f"{worst.split()[0]} set to its speed"
@@ -827,9 +829,7 @@ Scaling every increment in a layer is the same as changing that layer's RoPE fre
         text = (A / f"ablation_{MODELS[k][1]}.txt").read_text()
         nl = [
             float(x)
-            for x in re.search(r"^pattern: Newline\s+(.*)$", text, re.M)
-            .group(1)
-            .split()
+            for x in search(r"^pattern: Newline\s+(.*)$", text, re.M).group(1).split()
         ]
         sp_k = abl[k]["speed"]
         slow_k = [i for i, v in enumerate(sp_k) if v < 0.12]
@@ -851,7 +851,7 @@ Scaling every increment in a layer is the same as changing that layer's RoPE fre
             for n, v in abl[k]["rows"].items()
             if n.startswith("L") and n.endswith("speed")
         }
-        name = max(single, key=single.get)
+        name = max(single, key=lambda n: single[n])
         return name, single[name]
 
     body.append(
