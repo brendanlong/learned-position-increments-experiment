@@ -7,3 +7,4 @@ wandb/
 .DS_Store
 .ruff_cache/
 .pytest_cache/
+reports/docmask_2026_11/data/
