@@ -4,7 +4,8 @@
     aws s3 sync s3://brendanlong-experiments/learned-position-increments/reports/docmask_2026_11/data reports/docmask_2026_11/data
     python reports/docmask_2026_11/build.py OUT_DIR
 
-Published at https://lpi-docmask-report-cc88d3a2.surge.sh (republish there).
+Published at https://lpi-docmask-report-cc88d3a2.surge.sh (republish there;
+Lion Reader article 01a19a0d-ac70-7795-958e-a72c2ddf3639, refetch after updates).
 data/ is made by dump_char_deltas.py, dump_wandb.py and the analysis scripts'
 outputs (see the page's Reproduce section).
 
