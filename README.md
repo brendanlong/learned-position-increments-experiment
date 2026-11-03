@@ -43,6 +43,9 @@ Analysis / figure scripts:
   the real order than the reverse. (Measures causal *forward-continuation*
   expectation that tracks entity bigrams — see the script's docstring for the
   honest framing of what this does and does not show.)
+- `delta_ablation.py` — splits each layer's deltas into a speed (geometric
+  mean) and a per-token pattern, then replaces one layer's deltas at a time
+  with 1 or with its speed and reports the validation-loss change.
 - `indirect_indexing.py` / `train_diagnostic.py` — the PoPE indirect-indexing
   diagnostic task (a side check on content-conditional positional queries).
 
@@ -144,6 +147,13 @@ bytes, after the first 2,000 interleaved documents (about 41 MB) are reserved
 for validation. Training draws 50,000 × 64 random 512-byte windows, i.e. about
 1.6 GB, so each byte is seen roughly four times at different offsets. Without
 `--max-stories` the loader tries to stream all of Wikipedia into RAM.
+
+Since the post, attention is document-masked (no attention across EOS) and
+per-layer deltas are no longer capped; see Phase 13 of
+`experiments/selective_pe/RESULTS.md`. The command above now trains that
+version. To train exactly what the post used (unmasked, per-layer deltas
+bounded at 10), check out commit `382b494` first. `load_checkpoint` still
+loads the post's checkpoints with their original behavior.
 
 Two caveats about the original runs:
 

@@ -318,15 +318,17 @@ def main() -> None:
                 )
                 if cfg.use_wandb:
                     wandb.log(
-                        {"train/loss": avg, "train/ppl": math.exp(min(avg, 20.0)),
-                         "lr": lr}, step=step
+                        {
+                            "train/loss": avg,
+                            "train/ppl": math.exp(min(avg, 20.0)),
+                            "lr": lr,
+                        },
+                        step=step,
                     )
                 _log_delta_stats(model, input_ids, cfg.use_wandb, step)
 
             if step % cfg.eval_every_steps == 0:
-                m = evaluate(
-                    model, val_loader, device, autocast_ctx, cfg.eval_batches
-                )
+                m = evaluate(model, val_loader, device, autocast_ctx, cfg.eval_batches)
                 delta_vs_base = m["val/loss"] - base_metrics["val/loss"]
                 print(
                     f">>> eval step {step}: val/loss={m['val/loss']:.4f} "

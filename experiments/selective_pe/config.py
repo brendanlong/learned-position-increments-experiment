@@ -35,6 +35,9 @@ class SelectivePEModelConfig(BaseModel):
     # Selective PE config
     delta_hidden_dim: int | None = None  # MLP hidden dim; None = dim // 4
     per_layer_delta: bool = False  # Per-layer DeltaMLPs (vs shared)
+    # Sigmoid bound on deltas; None = unbounded softplus. Only set when
+    # loading the bounded per-layer checkpoints behind the blog post.
+    max_delta: float | None = None
     # Per-head delta: each head gets its own learned position rate (per-head
     # RoPE frequency scaling). Composes with per_layer_delta.
     per_head_delta: bool = False
@@ -46,6 +49,11 @@ class SelectivePEModelConfig(BaseModel):
     #               cumulative log-alpha becomes the additive decay bias.
     # Both decay modes are per-head and shared across layers.
     decay: Literal["none", "alibi", "learned"] = "none"
+    # Block attention across EOS (document boundaries). False only for the
+    # no-masking control and checkpoints trained before masking existed.
+    doc_mask: bool = True
+    # RMSNorm on each head's queries and keys before RoPE (as in OLMo 2)
+    qk_norm: bool = True
 
     @model_validator(mode="after")
     def _validate_architecture(self) -> "SelectivePEModelConfig":
@@ -62,6 +70,12 @@ class SelectivePEModelConfig(BaseModel):
     @property
     def head_dim(self) -> int:
         return self.dim // self.n_heads
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def eos_id(self) -> int:
+        # Both tokenizers put EOS last (GPT2_EOS_ID, BYTE_EOS_ID)
+        return self.vocab_size - 1
 
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -86,13 +100,15 @@ def selective_pe_model_config(
     per_layer_delta: bool = False,
     per_head_delta: bool = False,
     decay: Literal["none", "alibi", "learned"] = "none",
+    doc_mask: bool = True,
+    intermediate_dim: int | None = None,
 ) -> SelectivePEModelConfig:
     """Create model config with sensible defaults for selective PE experiments."""
     return SelectivePEModelConfig(
         dim=dim,
         n_heads=n_heads,
         n_layers=n_layers,
-        intermediate_dim=dim * 4,
+        intermediate_dim=intermediate_dim or dim * 4,
         vocab_size=vocab_size,
         max_seq_len=max_seq_len,
         pos_encoding=pos_encoding,
@@ -104,6 +120,7 @@ def selective_pe_model_config(
         per_layer_delta=per_layer_delta,
         per_head_delta=per_head_delta,
         decay=decay,
+        doc_mask=doc_mask,
     )
 
 

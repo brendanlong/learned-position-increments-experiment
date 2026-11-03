@@ -396,6 +396,310 @@ achieves via q/k content. The loss landscape pushes the model to *use* δ
 (it's not cosmetic), but at the same capability — a different solution, not a
 better one.
 
+## Phase 13: Document masking, unbounded per-layer deltas, and ablations
+
+**Question.** Per-layer deltas were capped (sigmoid, max_delta = 10) because
+they exploded. Training samples random 512-byte windows over EOS-joined
+documents, and attention used to cross EOS. The hypothesis: a huge position
+jump scrambles RoPE phase across a boundary, which was the model's only way to
+stop attending to the previous, unrelated document. So: block attention across
+EOS, remove the cap, and check (a) whether the explosion goes away and (b)
+whether the model actually uses its deltas.
+
+**Setup.** The blog-post config (byte-level bilingual Wikipedia, 256d/8h/6L,
+50k steps, batch 64 × 512, lr 1e-3). Per-layer DeltaMLPs keep the RMSNorm
+input but use the same unbounded softplus as the shared one. Runs (wandb
+`byte-pe`, lab Slurm A40s):
+
+| run | wandb | doc mask | final val loss |
+|---|---|---|---|
+| `docmask_rope_s42` (baseline) | `ycqqcknn` | yes | 1.0752 |
+| `docmask_shared_s42` | `4zee13hf` | yes | 1.0716 |
+| `docmask_perlayer_s42` | `zp4muno6` | yes | 1.0711 |
+| `docmask_perlayer_s1` | `qi0epy7e` | yes | 1.0698 |
+| `docmask_perlayer_s2` | `3866xiyd` | yes | 1.0697 |
+| `nodoc_mask_perlayer_unbounded_s42` (control) | `rrzpmhro` | no | 1.0787 |
+
+The control was evaluated without masking, so its val loss isn't directly
+comparable. The masked runs are again loss-neutral to slightly better than the
+RoPE baseline (−0.004 to −0.006, across 3 per-layer seeds vs 1 baseline seed).
+The control's checkpoint config was written before `doc_mask` existed; it was
+patched to `doc_mask: false` on the cluster before analysis, but its wandb
+artifact still lacks the field.
+
+Every table below comes from `delta_ablation.py`, `byte_boundary_analysis.py`
+and `entity_grouping_analysis.py` run on the final checkpoints (saved as wandb
+artifacts `selective-pe-<run name>`).
+
+### Explosion
+
+Largest delta on the logged sample batch (one batch per log step, so noisy):
+
+| step | control (no mask) | masked s42 | masked s1 | masked s2 |
+|---|---|---|---|---|
+| 1k | 2.9 | 1.9 | 3.9 | 2.0 |
+| 3k | 48.7 (L1 **mean** 45) | 3.1 | 8.8 | 3.0 |
+| 5k | **107.4** (L1 mean 23) | 3.5 | 11.0 | 3.3 |
+| 10k | 14.8 | 7.8 | 10.4 | 7.1 |
+| 50k | 25.0 | 8.4 | 15.3 | 7.2 |
+| peak | 107.4 | 13.7 | 17.0 | 12.9 |
+
+- With RMSNorm on the DeltaMLP input, even the unmasked control doesn't diverge
+  to the 500K+ of the original v1; it spikes early, then settles.
+- Masking removes the early spike entirely and keeps every layer's typical
+  delta near 1. Two masked seeds still exceed 10, so the old cap would have
+  bound some tokens even with masking.
+- At the end of training, the control's L3 sets EOS to **700×** that layer's
+  typical delta (≈ 25, the largest delta in the model), and the blog-post
+  replica (bounded, unmasked) sets EOS to 200× in L5. That is the
+  document-cutting use the hypothesis predicted. In the masked runs EOS starts
+  a document, so its delta has no effect (it shifts every later position
+  equally) and the EOS rows below are meaningless.
+
+### Speed and pattern
+
+Scaling every delta in a layer is the same as changing that layer's RoPE base,
+so each layer's deltas split into a **speed** (geometric mean delta over val
+data) and a **pattern** (delta / speed). This is done in analysis, not in the
+model (`delta_ablation.py`), as agreed with Brendan.
+
+Layer speeds:
+
+| run | L0 | L1 | L2 | L3 | L4 | L5 |
+|---|---|---|---|---|---|---|
+| masked s42 | 1.44 | 1.49 | 0.97 | 0.59 | 0.65 | **0.089** |
+| masked s1 | 1.70 | 1.63 | 0.98 | 1.07 | **0.093** | 0.26 |
+| masked s2 | 1.46 | 0.85 | 0.43 | 1.07 | 0.94 | **0.053** |
+| control | 2.17 | 2.30 | 1.17 | **0.035** | 0.84 | 0.70 |
+| blog replica | 1.95 | 1.58 | 1.29 | 0.43 | 1.12 | **0.049** |
+
+Every per-layer model has exactly one deep layer whose speed collapses to
+≈ 0.04–0.09: positions there barely change within a 512-byte window, so that
+layer runs almost without position information *except* at large-pattern
+tokens. In that layer, newline is 11–23× the typical delta (masked seeds), and
+the character plots show it packing whole words together with gaps between
+them. Which layer does this varies by seed.
+
+### Do the deltas matter? (layer-by-layer ablation)
+
+Loss increase (nats/byte, 819k val tokens spread over the val set) when a
+layer's deltas are replaced by 1 (integer RoPE) or by the layer's speed (keeps
+speed, removes pattern):
+
+| run | all = 1 | all = speed | L0 = speed | largest other layer = speed | largest other layer = 1 |
+|---|---|---|---|---|---|
+| masked per-layer s42 | +0.71 | +0.13 | +0.097 | L1 +0.008 | L5 +0.118 |
+| masked per-layer s1 | +1.36 | +0.30 | +0.261 | L4 +0.011 | L1 +0.280 |
+| masked per-layer s2 | +0.65 | +0.20 | +0.090 | L2 +0.054 | L5 +0.098 |
+| masked shared | +0.27 | +0.061 | +0.046 | L1 +0.003 | L1 +0.014 |
+| control (no mask) | +2.11 | +0.32 | +0.256 | L1 +0.017 | L1 +0.949 |
+| blog replica, per-layer | +1.11 | +0.30 | +0.265 | L5 +0.005 | L1 +0.193 |
+| blog replica, shared | +0.16 | +0.024 | +0.009 | L1 +0.007 | L1 +0.029 |
+
+For the shared models the same deltas feed every layer; a per-layer row
+replaces them only in that layer's attention.
+
+- **"Loss-neutral" doesn't mean unused.** Each model matches plain RoPE's loss,
+  but takes it from the deltas: forcing integer positions everywhere costs
+  0.65–1.36 nats in the masked per-layer models.
+- **The pattern that matters is L0's**, i.e. the byte-identity pattern
+  (+0.09 to +0.26 nats when removed), consistently across seeds.
+- **The deeper layers' contextual patterns barely matter**: removing one costs
+  ≤ 0.011 nats, apart from s2 L2 (+0.054). These are the layers behind the
+  blog post's Chinese-word-boundary and multi-word-entity findings, so that
+  structure is real but cheap for the model to lose.
+- **Deep-layer speed matters**: setting the near-position-free layer back to
+  speed 1 costs 0.10–0.21 nats in every per-layer model.
+
+### Interpretability results across seeds (masked)
+
+Chinese word-boundary ROC-AUC vs jieba (0.5 = chance; values below 0.5 mean
+boundaries get *smaller* deltas):
+
+| layer | s42 | s1 | s2 | control | blog (retrained, unmasked) |
+|---|---|---|---|---|---|
+| L0 | 0.52 | 0.52 | 0.51 | 0.49 | ~0.5 |
+| L1 | 0.54 | 0.53 | 0.64 | 0.47 | ~0.5 |
+| L2 | 0.57 | 0.54 | 0.57 | 0.55 | 0.63 |
+| L3 | 0.53 | 0.61 | 0.64 | 0.63 | 0.41 |
+| L4 | 0.47 | **0.24** | 0.63 | 0.52 | 0.72 |
+| L5 | 0.46 | 0.39 | 0.56 | 0.46 | 0.41 |
+
+Some contextual layer separates word boundaries in every seed, but which layer,
+how strongly, and in which direction varies. With masking, s42 is the weakest
+(max |AUC − 0.5| = 0.07).
+
+Multi-word entity test (delta at the internal space, real order vs reversed;
+two-sided Wilcoxon p):
+
+| layer | s42 | s1 | s2 | control |
+|---|---|---|---|---|
+| L1 | 2e-4 | 1e-3 | 0.9 | 0.28 |
+| L2 | 8e-4 | 2e-8 | 1e-4 | 0.11 |
+| L3 | 8e-7 | 9e-5 | 4e-9 | 2e-6 |
+| L4 | 0.08 | 3e-12 | 6e-10 | 2e-8 |
+| L5 | 1e-7 | 2e-8 | 6e-9 | 1e-6 |
+
+This is the most robust contextual result: real-order entities get a smaller
+internal-space delta in L2/L3/L5 in all three masked seeds.
+
+### Is delta more than the model's own uncertainty?
+
+Word boundaries are where the next character is hardest to predict, and "New"
+predicts "York" much better than "York" predicts "New". So both results could
+be the model's ordinary next-byte uncertainty showing up in the deltas. The
+analysis scripts now compute that uncertainty from the same forward pass.
+
+**Chinese word boundaries.** Single-feature AUC of the model's next-byte
+entropy just before each gap, and cross-validated AUC (logistic regression,
+5 folds grouped by 512-byte window) on uncertainty (entropy + next-character
+surprisal), on all six layers' log delta, and on both:
+
+| model | entropy alone | uncertainty | log delta | both | gain from delta |
+|---|---|---|---|---|---|
+| masked s42 | 0.862 | 0.876 | 0.621 | 0.882 | +0.006 |
+| masked s1 | 0.862 | 0.876 | 0.810 | 0.907 | +0.031 |
+| masked s2 | 0.860 | 0.875 | 0.720 | 0.886 | +0.011 |
+| control (no mask) | 0.862 | 0.877 | 0.647 | 0.884 | +0.007 |
+| blog replica | 0.860 | 0.876 | 0.750 | 0.891 | +0.015 |
+
+The model's own uncertainty separates word boundaries far better (0.86) than
+any layer's delta ever did (best single layer 0.72). Deltas add 0.006–0.031
+AUC on top, so they carry a little boundary information beyond uncertainty,
+but mostly they re-express it.
+
+**Multi-word entities.** At the internal space the model is already much more
+confident in the real order: log p(second word) is about −4 for real entities
+vs −9 reversed, and next-byte entropy is lower (2.5 vs 2.9–3.0 nats). Repeating
+the paired test on the part of log delta a linear fit on those two doesn't
+explain (two-sided Wilcoxon p; 6 tests per model, so Bonferroni 0.0083):
+
+| layer | s42 | s1 | s2 | control | blog replica |
+|---|---|---|---|---|---|
+| L1 | 0.18 | 0.28 | 0.95 | 0.77 | 0.49 |
+| L2 | 0.11 | 0.049 | 0.25 | 0.38 | 0.36 |
+| L3 | 0.23 | 0.55 | 0.49 | 0.077 | 0.78 |
+| L4 | 0.82 | **0.0038** | 0.093 | 0.35 | 0.29 |
+| L5 | 0.022 | 0.068 | **0.0075** | 0.019 | **0.0014** |
+
+Most of the entity effect is the model's forward expectation. What survives is
+in the slow, word-grouping layer (L5, or L4 in s1, the layer whose speed
+collapses to ≈ 0.05–0.09): it passes Bonferroni in 3 of 5 models and is
+p ≤ 0.022 in the other two. The fit uses final-output uncertainty and is
+linear, so a residual effect could still be uncertainty the fit misses.
+
+### Not done yet
+
+- More than one seed for the RoPE baseline.
+- A frequency-matched non-entity bigram control for the entity test.
+
+## Phase 14: SmolLM2-135M-sized model (576d/9h/30L, 122M params)
+
+**Question.** Are the Phase 13 results artifacts of a 6.4M-parameter model?
+At a size where the model is reasonably good, do the per-layer patterns
+converge across seeds, and do deltas carry more than the model's own
+uncertainty?
+
+**Setup.** Before scaling up, the model and optimizer were brought in line
+with SmolLM2/OLMo 2 practice (at Brendan's request). The architecture was
+already SmolLM2's (Llama: pre-norm RMSNorm, SwiGLU, RoPE, no biases, tied
+embeddings). Changed:
+- AdamW β2 0.95; weight decay 0.1 on weight matrices only. It used to apply
+  to every parameter, including the DeltaMLP bias, pulling every delta toward
+  softplus(0).
+- QK-norm (OLMo 2).
+- SmolLM2-135M shape: 576 wide, 30 layers, 9 heads of 64, FFN 1536.
+
+RoPE θ stays 10,000 (1024-byte context). Training: 1024-byte windows over
+300k bilingual Wikipedia documents (1.32 GB), batch 32, 50k steps (≈1.2
+passes), lr 6e-4, warmup 1000, cosine, document-masked attention via
+`flex_attention`. Runs were on lab-cluster A40s at low priority, about 9.5 h
+each. The per-layer runs were stopped by the 8-hour limit and resumed from
+saved state at step ~41k.
+
+| run | wandb | final val loss |
+|---|---|---|
+| `big_docmask_rope_s42` | `ac95615f` | 0.8718 |
+| `big_docmask_perlayer_s42` | `0669d9cc` | 0.8734 |
+| `big_docmask_perlayer_s1` | `3adb9f11` | 0.8719 |
+
+Loss-neutral again: within 0.0016 of RoPE at every 10k-step eval.
+
+**Large deltas without runaway.** Even with masking, the largest delta on the
+logged batch peaked at 115 (s42, step 16k) and 42.5 (s1), then settled at 34
+and 16. Training was unaffected.
+
+### Speed and pattern
+
+Both seeds have several **near-position-free layers** (speed ≤ 0.11), all in
+the middle to late network, and these are where the extreme patterns live:
+
+| seed | slow layers (speed) | pattern in those layers |
+|---|---|---|
+| s42 | L10 (0.001), L15 (0.009), L22 (0.001), L26 (0.017) | newline 600–1500×, sentence punct 270–540× (L22, L26) |
+| s1 | L13 (0.07), L15 (0.11), L16 (0.003), L17 (0.005) | newline 340–380×, sentence punct 150–180×, space ≈ 23× (L16, L17) |
+
+These layers barely move positions within a sentence and put a huge gap at
+sentence and paragraph boundaries. The *role* reproduces across seeds, but the
+layer indices don't, as in the small model.
+
+### Ablation
+
+| | s42 | s1 | small model (Phase 13) |
+|---|---|---|---|
+| all layers = 1 | +1.18 | +0.39 | +0.65 to +1.36 |
+| all layers = speed | **+0.041** | **+0.042** | +0.13 to +0.30 |
+| largest single layer = speed | L26 +0.004 | L0 +0.008 | L0 +0.09 to +0.26 |
+| largest single layer = 1 | L1 +0.55 | L3 +0.021 | +0.10 to +0.28 |
+
+The model still depends heavily on the deltas' speeds (s42's L1 runs at speed
+5.8; resetting it costs 0.55 nats). The per-token pattern is now spread out:
+removing all of it costs the same 0.04 nats in both seeds, but no single
+layer's pattern costs more than 0.008. The small model's dominant L0
+byte-identity pattern doesn't reappear.
+
+### Word boundaries vs the model's own uncertainty
+
+| | s42 | s1 | small model |
+|---|---|---|---|
+| next-byte entropy | 0.869 | 0.868 | 0.860–0.862 |
+| uncertainty (CV) | 0.880 | 0.879 | 0.875–0.877 |
+| all-layer log delta (CV) | **0.921** | **0.915** | 0.62–0.81 |
+| uncertainty + log delta (CV) | **0.930** | **0.930** | 0.88–0.91 |
+| gain from delta | **+0.050** | **+0.051** | +0.006 to +0.031 |
+| best single layer | L26 0.890 | L29 0.763 (L13 0.355) | ≤ 0.72 (|AUC − 0.5| ≤ 0.26) |
+
+At this size the deltas separate Chinese word boundaries **better than the
+model's own uncertainty does**, and add 0.05 AUC on top of it, identically in
+both seeds. In s42 a single slow layer (L26) beats next-byte entropy on its
+own. Caveat: the classifier has 30 delta features here vs 6 in the small
+model (cross-validated by window, 40k gaps, so overfitting is unlikely to
+explain 0.05, but more layers also means more chances to find signal).
+
+### Multi-word entities vs uncertainty
+
+The model is more confident than the small one that real entities continue
+(log p(second word) ≈ −2.7 real vs −9.5 reversed, against −4 vs −9). With 30
+tests per model, Bonferroni is p < 0.0017:
+- s42: L26 survives control for uncertainty (p = 2.5e-4), the same slow layer
+  that best separates word boundaries.
+- s1: nothing passes Bonferroni. Eight layers have p < 0.05, smallest L11
+  (4.3e-3).
+
+So the entity signal beyond uncertainty is suggestive at best.
+
+### Takeaways
+
+- **Convergence:** the two seeds agree on everything aggregate: loss, pattern
+  cost (0.041 vs 0.042), boundary AUC (0.930 vs 0.930), and having a cluster
+  of slow, boundary-heavy mid-to-late layers. They disagree on which layers.
+  Per-layer interpretation therefore has to be by role (find the slow layers),
+  not by index.
+- **Scale helps the interpretability case:** the deltas' word-boundary
+  information beyond the model's uncertainty grows from +0.006–0.031 to +0.05
+  AUC, and the slow layers are the natural place to look.
+- **The small model's "L0 pattern matters" result was a small-model effect.**
+
 ## Overall Conclusions
 
 1. **Loss-neutral everywhere (positions).** Across all delta phases, the
@@ -431,6 +735,5 @@ better one.
 
 - Length-extrapolation eval (train 512, test longer): the regime where ALiBi /
   a content-dependent forget gate would actually be expected to win.
-- Re-run per-layer with higher `max_delta` to resolve L1 saturation.
 - Reconcile the indirect-indexing discrepancy (single- vs multi-hop task).
 - Music (MAESTRO) — where PoPE showed its largest gains; needs a tokenizer.
