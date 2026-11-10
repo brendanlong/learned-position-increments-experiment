@@ -25,6 +25,7 @@ from torch.nn.attention.flex_attention import (
 )
 
 from experiments.selective_pe.config import SelectivePEModelConfig
+from shared.artifacts import resolve_checkpoint
 
 # ---------------------------------------------------------------------------
 # Positional encoding primitives
@@ -235,44 +236,9 @@ class FrozenDeltaLookup(nn.Module):
         return self.deltas[input_ids]
 
 
-def _resolve_checkpoint_path(source: str) -> str:
-    """Resolve a checkpoint source to a local file path.
-
-    Supports:
-    - Local file paths (returned as-is)
-    - wandb artifact paths (prefixed with "wandb:"): downloads the
-      artifact and returns the path to the .pt file inside it.
-
-    Example: "wandb:brendanlong-com/byte-pe/artifact-name:v0"
-    """
-    if not source.startswith("wandb:"):
-        return source
-
-    import wandb as wb
-
-    artifact_name = source.removeprefix("wandb:")
-    print(f"  Downloading wandb artifact: {artifact_name}")
-    api = wb.Api()
-    artifact = api.artifact(artifact_name)
-    download_dir = artifact.download(
-        root=f"data/selective_pe/wandb_checkpoints/{artifact.name}",
-    )
-
-    # Find the .pt file in the download directory
-    import os
-
-    pt_files = [f for f in os.listdir(download_dir) if f.endswith(".pt")]
-    assert len(pt_files) == 1, (
-        f"Expected 1 .pt file in artifact, found {len(pt_files)}: {pt_files}"
-    )
-    return os.path.join(download_dir, pt_files[0])
-
-
 def load_checkpoint(source: str) -> "SelectivePETransformer":
-    """Load a model in eval mode from a local path or "wandb:..." artifact."""
-    ckpt = torch.load(
-        _resolve_checkpoint_path(source), map_location="cpu", weights_only=True
-    )
+    """Load a model in eval mode from a local path or "hf:..." checkpoint."""
+    ckpt = torch.load(resolve_checkpoint(source), map_location="cpu", weights_only=True)
     model_config = ckpt["model_config"]
     # Fields missing from older checkpoints get the behavior they were trained
     # with. Checkpoints without max_delta (the blog post's models) were also
@@ -293,7 +259,7 @@ def extract_frozen_deltas(source: str) -> Tensor:
     """Extract per-token deltas from a trained selective PE checkpoint.
 
     Args:
-        source: Local path or "wandb:org/project/artifact:version"
+        source: Local path or "hf:<experiment>/<run_name>/<file>"
 
     Loads the checkpoint, runs the DeltaMLP on all token embeddings,
     and returns a (vocab_size,) tensor of frozen deltas.

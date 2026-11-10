@@ -424,12 +424,12 @@ The control was evaluated without masking, so its val loss isn't directly
 comparable. The masked runs are again loss-neutral to slightly better than the
 RoPE baseline (−0.004 to −0.006, across 3 per-layer seeds vs 1 baseline seed).
 The control's checkpoint config was written before `doc_mask` existed; it was
-patched to `doc_mask: false` on the cluster before analysis, but its wandb
-artifact still lacks the field.
+patched to `doc_mask: false` on the cluster before analysis; the released
+checkpoint has the same patch.
 
 Every table below comes from `delta_ablation.py`, `byte_boundary_analysis.py`
-and `entity_grouping_analysis.py` run on the final checkpoints (saved as wandb
-artifacts `selective-pe-<run name>`).
+and `entity_grouping_analysis.py` run on the final checkpoints
+(`hf:selective_pe/<run name>/step_50000.pt`).
 
 ### Explosion
 

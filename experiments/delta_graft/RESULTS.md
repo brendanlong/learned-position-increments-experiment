@@ -168,11 +168,11 @@ improves (it won't).
 
 ## Runs (wandb project `delta-graft`)
 
-| run | mode | steps | final val ppl | vs base | artifact |
+| run | mode | steps | final val ppl | vs base | checkpoint |
 |-----|------|-------|---------------|---------|----------|
-| SmolLM2-1.7B_lora_delta    | LoRA | 2000 | 9.666 | +0.0007 | `delta-graft-SmolLM2-1.7B_lora_delta` |
+| SmolLM2-1.7B_lora_delta    | LoRA | 2000 | 9.666 | +0.0007 | `hf:delta_graft/SmolLM2-1.7B_lora_delta/delta_mlp.pt` |
 | SmolLM2-1.7B_lora_baseline | LoRA | 2000 | 9.653 | −0.0007 | — |
-| SmolLM2-1.7B_full_delta    | full | 800  | 9.469 | −0.0233 | `delta-graft-SmolLM2-1.7B_full_delta` |
+| SmolLM2-1.7B_full_delta    | full | 800  | 9.469 | −0.0233 | `hf:delta_graft/SmolLM2-1.7B_full_delta/delta_mlp.pt` |
 | SmolLM2-1.7B_full_baseline | full | 800  | 9.471 | −0.0234 | — |
 
 ## Files

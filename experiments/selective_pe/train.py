@@ -181,11 +181,6 @@ def main() -> None:
     parser.add_argument("--no-wandb", action="store_true")
     parser.add_argument("--wandb-project", type=str, default="byte-pe")
     parser.add_argument("--wandb-run-name", type=str, default=None)
-    parser.add_argument(
-        "--save-checkpoint",
-        action="store_true",
-        help="Upload final checkpoint to wandb as artifact",
-    )
 
     # Misc
     parser.add_argument("--seed", type=int, default=42)
@@ -382,7 +377,6 @@ def main() -> None:
             "model": model_config.model_dump(),
             "training": training_config.model_dump(),
         },
-        save_checkpoint_to_wandb=args.save_checkpoint,
         use_compile=not args.no_compile,
     )
 

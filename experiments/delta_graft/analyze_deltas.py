@@ -11,34 +11,20 @@ checkpoint), so the analysis is approximate.
 
 Usage:
     uv run python -m experiments.delta_graft.analyze_deltas \
-        --checkpoint wandb:brendanlong-com/delta-graft/delta-graft-<run>:v0 \
+        --checkpoint hf:delta_graft/<run>/<file>.pt \
         --base-model HuggingFaceTB/SmolLM2-1.7B
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 from typing import cast
 
 import torch
 from torch import nn
 
 from experiments.selective_pe.model import DeltaMLP
-
-
-def resolve_checkpoint(source: str) -> str:
-    if not source.startswith("wandb:"):
-        return source
-    import wandb
-
-    name = source.removeprefix("wandb:")
-    api = wandb.Api()
-    art = api.artifact(name)
-    d = art.download(root=f"data/delta_graft/wandb_checkpoints/{art.name}")
-    pts = [f for f in os.listdir(d) if f.endswith(".pt")]
-    assert len(pts) == 1, f"expected 1 .pt, found {pts}"
-    return os.path.join(d, pts[0])
+from shared.artifacts import resolve_checkpoint
 
 
 def categorize(tok: str) -> str:
@@ -88,7 +74,9 @@ def main() -> None:
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    ckpt = torch.load(resolve_checkpoint(args.checkpoint), weights_only=True)
+    ckpt = torch.load(
+        resolve_checkpoint(args.checkpoint), map_location="cpu", weights_only=True
+    )
     state = ckpt["delta_mlp_state_dict"]
     in_dim = state["fc1.weight"].shape[1]
     hidden_dim = state["fc1.weight"].shape[0]

@@ -6,6 +6,8 @@ requires-python = ">=3.12"
 dependencies = [
     # Data
     "datasets>=3.0",
+    # Released checkpoints (shared/artifacts.py)
+    "huggingface-hub>=0.24",
     # ML
     # 2.11+ ships type stubs that trip pyright's reportPrivateImportUsage on
     # torch.tensor/torch.device/etc.; pin to the 2.10 line (verified clean).

@@ -6,9 +6,9 @@ pipeline, and reran every analysis script. Original = the checkpoints behind
 the blog post (wandb runs `rt7cv5ww` shared, `ho7v6eou` per-layer); replica =
 wandb runs `q19navjs` (shared, RunPod via `./train.sh remote`) and `0eqetsep`
 (per-layer, local RTX 3060 Ti via `./train.sh local`). Replica checkpoints:
-wandb artifacts `selective-pe-repro_byte_selective_rope_bilingual_256d_8h_6L_lr1e3:v0`
-and `selective-pe-repro_byte_selective_rope_perlayer_bilingual_256d_8h_6L_lr1e3:v0`
-(also `s3://brendanlong-experiments/selective_pe/checkpoints/repro_{shared,perlayer}/`).
+`hf:selective_pe/repro_byte_selective_rope_bilingual_256d_8h_6L_lr1e3/step_50000.pt`
+and `hf:selective_pe/repro_byte_selective_rope_perlayer_bilingual_256d_8h_6L_lr1e3/step_50000.pt`
+(see the README's "Checkpoints" section).
 
 ## Validation loss
 
@@ -102,7 +102,7 @@ L5 in the replica).
 
 ## Delta-graft
 
-`analyze_deltas.py` on the artifacts `delta-graft-SmolLM2-1.7B_lora_delta:v0`
-and `delta-graft-SmolLM2-1.7B_full_delta:v0` reproduces every number in
+`analyze_deltas.py` on `hf:delta_graft/SmolLM2-1.7B_lora_delta/delta_mlp.pt`
+and `hf:delta_graft/SmolLM2-1.7B_full_delta/delta_mlp.pt` reproduces every number in
 `../delta_graft/RESULTS.md` (LoRA: mean 1.033, std 0.011, EOS 1.053; full:
 mean 1.002, std 0.003, EOS 1.014; same category medians).
