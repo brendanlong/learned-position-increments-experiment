@@ -172,24 +172,33 @@ Two caveats about the original runs:
   The per-layer model's checkpoint was lost. Replicas of both models trained
   from this repo with the command above (run names prefixed `repro_`) are
   wandb runs `q19navjs` (shared) and `0eqetsep` (per-layer), checkpoints
-  `hf:selective_pe/repro_byte_selective_rope_{,perlayer_}bilingual_256d_8h_6L_lr1e3/step_50000.pt`; see
+  `hf:selective_pe/repro_byte_selective_rope_bilingual_256d_8h_6L_lr1e3/step_50000.pt`
+  and
+  `hf:selective_pe/repro_byte_selective_rope_perlayer_bilingual_256d_8h_6L_lr1e3/step_50000.pt`; see
   `experiments/selective_pe/REPRODUCTION.md` for a side-by-side comparison
   of every table in the post.
 
-The analysis commands that produced the post's tables and figures:
+The analysis commands that produced the post's tables and figures. To run
+them on the released checkpoints, use the post's shared model and the
+per-layer replica (the post's own per-layer model was lost):
+
+```bash
+SHARED=hf:selective_pe/byte_selective_rope_bilingual_256d_8h_6L_lr1e3/step_50000.pt
+PERLAYER=hf:selective_pe/repro_byte_selective_rope_perlayer_bilingual_256d_8h_6L_lr1e3/step_50000.pt
+```
 
 ```bash
 # Per-byte δ table (Part 1) and Chinese word-boundary AUC vs jieba (Part 2)
 uv run python -m experiments.selective_pe.byte_boundary_analysis \
-  --shared <shared_ckpt> --per-layer <perlayer_ckpt>
+  --shared $SHARED --per-layer $PERLAYER
 # Multi-word-entity reversed-order control
 uv run python -m experiments.selective_pe.entity_grouping_analysis \
-  --shared <shared_ckpt> --per-layer <perlayer_ckpt>
+  --shared $SHARED --per-layer $PERLAYER
 # Character-spacing figures (per-row normalization, then the shared-scale one)
 uv run python -m experiments.selective_pe.plot_increments \
-  --shared <shared_ckpt> --per-layer <perlayer_ckpt> --out-dir data/plots
+  --shared $SHARED --per-layer $PERLAYER --out-dir data/plots
 uv run python -m experiments.selective_pe.plot_increments \
-  --per-layer <perlayer_ckpt> --scale shared --out-dir data/plots
+  --per-layer $PERLAYER --scale shared --out-dir data/plots
 ```
 
 The post's "Punctuation" row is the script's sentence-punctuation category
