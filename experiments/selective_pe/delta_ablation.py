@@ -79,7 +79,7 @@ def per_token_loss(
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("checkpoint", help="local path or wandb:<artifact>")
+    p.add_argument("checkpoint", help="local path or hf:<experiment>/<run_name>/<file>")
     p.add_argument("--dataset", default="bilingual")
     p.add_argument("--val-max-docs", type=int, default=2000)
     p.add_argument("--context-len", type=int, default=512)

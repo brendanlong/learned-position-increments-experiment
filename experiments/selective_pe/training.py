@@ -19,7 +19,6 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR
 
 from experiments.selective_pe.data import StreamingChunkDataset
 from experiments.selective_pe.model import SelectivePETransformer, print_model_summary
-from shared.checkpoint import upload_checkpoint_to_wandb
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
@@ -201,7 +200,6 @@ def train_selective_pe(
     wandb_project: str = "byte-pe",
     wandb_run_name: str | None = None,
     wandb_config: dict[str, object] | None = None,
-    save_checkpoint_to_wandb: bool = False,
     use_compile: bool = True,
 ) -> TrainingResult:
     """Train a selective PE transformer on next-token prediction.
@@ -227,7 +225,6 @@ def train_selective_pe(
         wandb_project: Wandb project name
         wandb_run_name: Wandb run name
         wandb_config: Config dict to log to wandb
-        save_checkpoint_to_wandb: Upload final checkpoint as wandb artifact
         use_compile: Whether to use torch.compile
 
     Returns:
@@ -482,23 +479,6 @@ def train_selective_pe(
 
     if use_wandb:
         wandb.log(final_eval, step=global_step)
-
-        if save_checkpoint_to_wandb and last_checkpoint_path is not None:
-            upload_checkpoint_to_wandb(
-                last_checkpoint_path,
-                artifact_name=(
-                    f"selective-pe-{wandb_run_name}"
-                    if wandb_run_name
-                    else "selective-pe-model"
-                ),
-                metadata={
-                    "total_steps": global_step,
-                    "best_val_loss": best_val_loss,
-                    "final_val_loss": final_eval["val/loss"],
-                    "final_val_ppl": final_eval["val/ppl"],
-                    "pos_encoding": model_config.pos_encoding,
-                },
-            )
         wandb.finish()
 
     resume_path.unlink(missing_ok=True)

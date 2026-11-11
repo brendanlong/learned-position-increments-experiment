@@ -32,7 +32,6 @@ from experiments.delta_graft.model import (
     build_delta_graft_model,
     count_trainable_params,
 )
-from shared.checkpoint import upload_checkpoint_to_wandb
 
 
 def parse_args() -> argparse.Namespace:
@@ -348,13 +347,7 @@ def main() -> None:
         _log_delta_stats(model, sample, cfg.use_wandb, step)
 
     if cfg.save_checkpoint:
-        ckpt = save_delta_checkpoint(model, model_cfg, cfg, step, final)
-        if cfg.use_wandb:
-            upload_checkpoint_to_wandb(
-                ckpt,
-                artifact_name=f"delta-graft-{cfg.wandb_run_name}",
-                metadata={**model_cfg.model_dump(), **final},
-            )
+        save_delta_checkpoint(model, model_cfg, cfg, step, final)
 
     if cfg.use_wandb:
         wandb.log(final, step=step)

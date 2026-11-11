@@ -14,7 +14,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-10-25T02:28:13.96441306Z"
+exclude-newer = "2026-11-03T23:15:37.801107683Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -1729,6 +1729,7 @@ source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
     { name = "datasets" },
+    { name = "huggingface-hub" },
     { name = "jieba" },
     { name = "matplotlib" },
     { name = "numpy" },
@@ -1753,6 +1754,7 @@ dev = [
 requires-dist = [
     { name = "accelerate", specifier = ">=1.0" },
     { name = "datasets", specifier = ">=3.0" },
+    { name = "huggingface-hub", specifier = ">=0.24" },
     { name = "jieba", specifier = ">=0.42" },
     { name = "matplotlib", specifier = ">=3.9" },
     { name = "numpy", specifier = ">=1.26" },

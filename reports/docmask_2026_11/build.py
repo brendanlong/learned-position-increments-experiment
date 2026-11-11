@@ -909,13 +909,13 @@ Scaling every increment in a layer is the same as changing that layer's RoPE fre
     body.append(f"""
 <h2>Reproduce</h2>
 <p>Code: branch <code>brendanlong/doc-mask-unbounded-deltas</code> (PR #3). Results write-up: <code>experiments/selective_pe/RESULTS.md</code>, phases 13–14.
-wandb project <code>brendanlong-com/byte-pe</code>; final checkpoints are the artifacts <code>selective-pe-&lt;run name&gt;:v0</code>.</p>
+wandb project <code>brendanlong-com/byte-pe</code>; final checkpoints are <code>hf:selective_pe/&lt;run name&gt;/step_50000.pt</code> in the Hugging Face dataset <code>brendanlong/learned-position-increments-experiment</code>.</p>
 <pre>
 # small (the post's config; add --per-layer-delta, or --pos-encoding rope; --no-doc-mask for the control)
 uv run python -m experiments.selective_pe.train --dataset bilingual --tokenizer byte \\
   --pos-encoding selective_rope --max-stories 60000 --val-max-docs 2000 --context-len 512 \\
   --generate-n 10000000 --total-steps 50000 --batch-size 64 --lr 1e-3 --weight-decay 0.01 \\
-  --warmup-steps 500 --save-checkpoint --seed 42
+  --warmup-steps 500 --seed 42
 
 # large
 uv run python -m experiments.selective_pe.train --dataset bilingual --tokenizer byte \\
@@ -923,7 +923,7 @@ uv run python -m experiments.selective_pe.train --dataset bilingual --tokenizer 
   --dim 576 --n-heads 9 --n-layers 30 --intermediate-dim 1536 \\
   --max-stories 300000 --val-max-docs 2000 --context-len 1024 --generate-n 10000000 \\
   --total-steps 50000 --batch-size 32 --lr 6e-4 --weight-decay 0.1 --warmup-steps 1000 \\
-  --save-every-steps 2000 --save-checkpoint --seed 42
+  --save-every-steps 2000 --seed 42
 
 # analyses (per checkpoint)
 uv run python -m experiments.selective_pe.delta_ablation CKPT [--context-len 1024]

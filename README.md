@@ -87,7 +87,7 @@ RUN_NAME=perlayer ./train.sh local selective_pe -- \
   --dataset bilingual --tokenizer byte --max-stories 60000 --val-max-docs 2000 \
   --context-len 512 --generate-n 10000000 --total-steps 50000 \
   --batch-size 64 --grad-accum-steps 1 --lr 1e-3 --weight-decay 0.01 \
-  --warmup-steps 500 --save-checkpoint
+  --warmup-steps 500
 
 # Graft deltas onto SmolLM2 with LoRA
 ./train.sh remote delta_graft -- \
@@ -95,9 +95,9 @@ RUN_NAME=perlayer ./train.sh local selective_pe -- \
   --total-steps 2000 --save-checkpoint
 ```
 
-`RUN_NAME` namespaces the S3 checkpoint path; `--save-checkpoint` also uploads
-the final checkpoint as a wandb artifact named `selective-pe-<wandb-run-name>`,
-which is the easiest way to get it back from a remote job.
+`RUN_NAME` namespaces the S3 checkpoint path. `selective_pe` always writes
+checkpoints to `--checkpoint-dir` (default `data/selective_pe/checkpoints`);
+`delta_graft` writes its DeltaMLP there only with `--save-checkpoint`.
 
 Or invoke a module directly without SkyPilot:
 
@@ -106,7 +106,9 @@ uv run python -m experiments.selective_pe.train --help
 uv run python -m experiments.delta_graft.train --help
 ```
 
-Analysis scripts take checkpoint paths:
+Analysis scripts take checkpoint paths: a local file, or
+`hf:<experiment>/<run_name>/<file>` to download one of the released checkpoints
+(see [Checkpoints](#checkpoints)):
 
 ```bash
 uv run python -m experiments.selective_pe.plot_increments \
@@ -137,7 +139,7 @@ uv run python -m experiments.selective_pe.train \
   --generate-n 10000000 --total-steps 50000 --batch-size 64 --grad-accum-steps 1 \
   --lr 1e-3 --weight-decay 0.01 --warmup-steps 500 \
   --eval-every-steps 1000 --log-every-steps 200 --save-every-steps 10000 \
-  --wandb-project byte-pe --save-checkpoint \
+  --wandb-project byte-pe \
   --wandb-run-name byte_selective_rope_bilingual_256d_8h_6L_lr1e3
 ```
 
@@ -165,29 +167,38 @@ Two caveats about the original runs:
   training data. The post's main qualitative results hold for retrained
   models, with seed-level differences in the per-layer details (see the
   replica runs below and `experiments/selective_pe/REPRODUCTION.md`).
-- The shared model's checkpoint is the wandb artifact
-  `brendanlong-com/byte-pe/selective-pe-byte_selective_rope_bilingual_256d_8h_6L_lr1e3:v0`.
-  The per-layer model's artifact was lost. Replicas of both models trained
+- The shared model's checkpoint is
+  `hf:selective_pe/byte_selective_rope_bilingual_256d_8h_6L_lr1e3/step_50000.pt`.
+  The per-layer model's checkpoint was lost. Replicas of both models trained
   from this repo with the command above (run names prefixed `repro_`) are
-  wandb runs `q19navjs` (shared) and `0eqetsep` (per-layer), artifacts
-  `selective-pe-repro_*:v0`; see
+  wandb runs `q19navjs` (shared) and `0eqetsep` (per-layer), checkpoints
+  `hf:selective_pe/repro_byte_selective_rope_bilingual_256d_8h_6L_lr1e3/step_50000.pt`
+  and
+  `hf:selective_pe/repro_byte_selective_rope_perlayer_bilingual_256d_8h_6L_lr1e3/step_50000.pt`; see
   `experiments/selective_pe/REPRODUCTION.md` for a side-by-side comparison
   of every table in the post.
 
-The analysis commands that produced the post's tables and figures:
+The analysis commands that produced the post's tables and figures. To run
+them on the released checkpoints, use the post's shared model and the
+per-layer replica (the post's own per-layer model was lost):
+
+```bash
+SHARED=hf:selective_pe/byte_selective_rope_bilingual_256d_8h_6L_lr1e3/step_50000.pt
+PERLAYER=hf:selective_pe/repro_byte_selective_rope_perlayer_bilingual_256d_8h_6L_lr1e3/step_50000.pt
+```
 
 ```bash
 # Per-byte δ table (Part 1) and Chinese word-boundary AUC vs jieba (Part 2)
 uv run python -m experiments.selective_pe.byte_boundary_analysis \
-  --shared <shared_ckpt> --per-layer <perlayer_ckpt>
+  --shared $SHARED --per-layer $PERLAYER
 # Multi-word-entity reversed-order control
 uv run python -m experiments.selective_pe.entity_grouping_analysis \
-  --shared <shared_ckpt> --per-layer <perlayer_ckpt>
+  --shared $SHARED --per-layer $PERLAYER
 # Character-spacing figures (per-row normalization, then the shared-scale one)
 uv run python -m experiments.selective_pe.plot_increments \
-  --shared <shared_ckpt> --per-layer <perlayer_ckpt> --out-dir data/plots
+  --shared $SHARED --per-layer $PERLAYER --out-dir data/plots
 uv run python -m experiments.selective_pe.plot_increments \
-  --per-layer <perlayer_ckpt> --scale shared --out-dir data/plots
+  --per-layer $PERLAYER --scale shared --out-dir data/plots
 ```
 
 The post's "Punctuation" row is the script's sentence-punctuation category
@@ -199,14 +210,25 @@ word in either slot (59 pairs kept); the effect survives with L2 p=5e-4,
 L4 p=2e-5, L5 p=9e-5.
 
 The SmolLM2 fine-tune shown at the end of the post is wandb project
-`delta-graft`; its DeltaMLP checkpoints are the artifacts
-`delta-graft-SmolLM2-1.7B_lora_delta:v0` and `delta-graft-SmolLM2-1.7B_full_delta:v0`,
-and `experiments/delta_graft/RESULTS.md` is regenerated by
+`delta-graft`; its DeltaMLP checkpoints are
+`hf:delta_graft/SmolLM2-1.7B_lora_delta/delta_mlp.pt` and
+`hf:delta_graft/SmolLM2-1.7B_full_delta/delta_mlp.pt`, and
+`experiments/delta_graft/RESULTS.md` is regenerated by
 
 ```bash
 uv run python -m experiments.delta_graft.analyze_deltas \
-  --checkpoint wandb:brendanlong-com/delta-graft/<artifact>
+  --checkpoint hf:delta_graft/SmolLM2-1.7B_lora_delta/delta_mlp.pt
 ```
+
+## Checkpoints
+
+The released checkpoints are in the public Hugging Face dataset
+[`brendanlong/learned-position-increments-experiment`](https://huggingface.co/datasets/brendanlong/learned-position-increments-experiment),
+laid out as `<experiment>/<run_name>/<file>.pt` with a `.json` metadata file
+(wandb run ID, final metrics, sha256) next to each. Pass them to any script as
+`hf:<experiment>/<run_name>/<file>`; they download into the Hugging Face cache
+and need no account. The dataset card lists every run. Maintainers add new
+checkpoints with `scripts/upload_artifacts.py`.
 
 ## Results write-ups
 
